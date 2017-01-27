@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <opcua port="16664"/>
+    <device name="LA1-MFH.01"/>
+    <parameters>
+        <register number="31" name="CurrSlewRate" description="default current slew rate [A/s]"/>
+        <register number="32" name="VoltSlewRate" description="default voltage slew rate [V/s]"/>
+        <register number="40" name="PID_I_Kp_v" description="what?"/>
+        <register number="41" name="PID_I_Ki_v" description="what?"/>
+        <register number="42" name="PID_I_Kd_v" description="what?"/>
+        <register number="43" name="PID_I_Kp_i" description="CC mode P-term for current regulation"/>
+        <register number="44" name="PID_I_Ki_i" description="CC mode I-term for current regulation"/>
+        <register number="45" name="PID_I_Kd_i" description="CC mode D-term for current regulation"/>
+        <register number="46" name="PID_I_AccMaxV" description="CC mode maximum voltage [V] applied to change the current"/>
+        <register number="47" name="PID_I_AccMinV" description="CC mode minimum voltage [V] applied to change the current"/>
+        <register number="60" name="PID_V_Kp_i" description="what?"/>
+        <register number="61" name="PID_V_Ki_i" description="what?"/>
+        <register number="62" name="PID_V_Kd_i" description="what?"/>
+        <register number="63" name="PID_V_Kp_v" description="CV mode P-term for voltage regulation"/>
+        <register number="64" name="PID_V_Ki_v" description="CV mode I-term for voltage regulation"/>
+        <register number="65" name="PID_V_Kd_v" description="CV mode D-term for voltage regulation"/>
+        <register number="66" name="PID_V_AccMaxI" description="CV mode maximum current [A] driven to change the voltage"/>
+        <register number="67" name="PID_V_AccMinI" description="CV mode minimum current [A] driven to change the voltage"/>
+    </parameters>
+</configuration>
+
