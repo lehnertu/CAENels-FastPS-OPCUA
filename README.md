@@ -28,7 +28,7 @@ Build the server
 The server is built with a cross-compiler running on a Linux system
 for the ARM target CPU of the power supplies.
 
-The OPC UA stack needds to be downloaded and built. This can be done on
+The OPC UA stack needs to be downloaded and built. This can be done on
 the development system - there is no binary code produced at this stage.
 The complete stack is obtained in two (amalgamated) files.
 - open62541.h
