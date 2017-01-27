@@ -26,12 +26,22 @@ cover the whole functionality provided by the devices, only the essentials.
 Build the server
 ================
 The server is built with a cross-compiler running on a Linux system
-for the ARM target CPU of the power supplies
+for the ARM target CPU of the power supplies.
 
-source ../tools/environment
-$CC -std=c99 -c open62541.c
-$CC -std=c99 -c -I $SDKTARGETSYSROOT/usr/include/libxml2/ OpcUaServer.c
-$CXX -o opcuaserver OpcUaServer.o open62541.o -lpthread -lxml2
+The OPC UA stack needds to be downloaded and built. This can be done on
+the development system - there is no binary code produced at this stage.
+The complete stack is obtained in two (amalgamated) files.
+- open62541.h
+- open62541.c
+
+In addition the libxml2 library is required. It needs to be built
+and installed into the cross-target tool chain.
+
+A makefile is not yet provided, just a few lines are required to build the server.
+- source ../tools/environment
+- $CC -std=c99 -c open62541.c
+- $CC -std=c99 -c -I $SDKTARGETSYSROOT/usr/include/libxml2/ OpcUaServer.c
+- $CXX -o opcuaserver OpcUaServer.o open62541.o -lpthread -lxml2
 
 Installation
 ============
