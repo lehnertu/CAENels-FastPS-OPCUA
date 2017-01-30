@@ -52,3 +52,10 @@ For istallation a few files need to be copied onto the device:
 
 The server can then be run by executing /tmp/opcuaserver.
 
+Testing
+=======
+For a first test of the server an universal OPC UA client like
+[UaExpert](https://www.unified-automation.com/products/development-tools/uaexpert.html) is recommended.
+
+A LabView client demonstrating the access using OPC UA is provided in the examples/ folder.
+
