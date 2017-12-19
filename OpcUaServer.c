@@ -259,6 +259,36 @@ UA_StatusCode writeCurrent(void *handle, const UA_NodeId nodeid,
     return UA_STATUSCODE_GOOD;
 }
 
+// callback routine for reading the voltage value
+UA_StatusCode readVoltage( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
+        const UA_NumericRange *range, UA_DataValue *dataValue) {
+    // handle is supposed to point to VoltageReadback
+    // send request to server    
+    strcpy(command,"MRV\r\n");
+    unsigned int reclen = TcpSendReceive();
+    // convert buffer to numerical value
+    // first 5 charecters are #MRV:
+    int result = sscanf(response+5,"%lf",(double *)handle);
+    // set the variable value
+    dataValue->hasValue = true;
+    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
+    return UA_STATUSCODE_GOOD;
+}
+
+// callback routine for writing the voltage value
+UA_StatusCode writeVoltage(void *handle, const UA_NodeId nodeid,
+            const UA_Variant *data, const UA_NumericRange *range) {
+    // handle is supposed to point to VoltageReadback
+    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_DOUBLE] && data->data) {
+        *(UA_Double*)handle = *(UA_Double*)data->data;
+    }
+    // send request to server
+    sprintf(command,"MWV:%9.6f\r\n",*(double *)handle);
+    // UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
+    TcpSendReceive();
+    return UA_STATUSCODE_GOOD;
+}
+
 UA_StatusCode readRegister( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
         const UA_NumericRange *range, UA_DataValue *dataValue) {
     // handle is supposed to point to the (unsigned short) register number
@@ -576,6 +606,28 @@ int main(int argc, char *argv[])
             UA_NODEID_NULL,
             attr,
             CurrentDataSource,
+            NULL);
+
+    double VoltageReadback = 0.0;
+    UA_VariableAttributes_init(&attr);
+    attr.description = UA_LOCALIZEDTEXT("en_US","voltage readback [V]");
+    attr.displayName = UA_LOCALIZEDTEXT("en_US","Voltage");
+    attr.accessLevel = UA_ACCESSLEVELMASK_READ;
+    UA_DataSource VoltageDataSource = (UA_DataSource)
+        {
+            .handle = &VoltageReadback,
+            .read = readVoltage,
+            .write = 0
+        };
+    UA_Server_addDataSourceVariableNode(
+            server,
+            UA_NODEID_NUMERIC(1, 0),
+            SetPointFolder,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_QUALIFIEDNAME(1, "Voltage"),
+            UA_NODEID_NULL,
+            attr,
+            VoltageDataSource,
             NULL);
 
     // the variable for the current setpoint is defined globally
