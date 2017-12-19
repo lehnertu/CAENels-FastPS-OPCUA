@@ -59,10 +59,9 @@
  *  - OutputOn should be in the device folder
  *  - evaluate the AK/NAK responses
  *  - error handling when reading the device response, don't just die
- *  - correct setpoint handling (it can bea read!)
+ *  - correct setpoint handling (it can be read!)
  *  - VER
  *  - LOOP
- *  - MRV/MWV
  *  - MSAVE
  *
  */
