@@ -58,8 +58,7 @@
  *  A LabView client demonstrating the access using OPC UA is provided in the examples/ folder.
  *
  *  @section TODO
- *  - OutputOn should return the actual setting as obtained from the status word
- *  - OutputOn should be in the device folder
+ *  - OPC UA and UDP requests may conflict in their access to the TCP/IP server
  *  - evaluate the AK/NAK responses
  *  - error handling when reading the device response, don't just die
  *  - VER
@@ -79,6 +78,7 @@
 #include <signal.h>		     // for signal()
 #include <errno.h>		     // for error messages
 #include <pthread.h>         // for threads
+#include <math.h>
 
 #include <sys/socket.h>      // for TCP/IP communication
 #include <netinet/udp.h>	 // declarations for udp header
@@ -111,10 +111,10 @@ UA_Logger logger = Logger_Stdout;
     Device
     |   Name
     |   Status
+    |   OutputOn
     |   MReset
     |   UDP-cnt
     SetPoint
-    |   OutputOn
     |   Voltage
     |   Current
     |   VoltageSetpoint
@@ -186,7 +186,7 @@ unsigned int TcpSendReceive() {
 // the data structure received by the PS
 #define CONTROLSIZE 24
 #define CONTROLMAGIC 0x4C556543
-struct control_data {
+struct __attribute__((packed, aligned(4))) control_data {
    uint32_t magic;              // signature word
    uint32_t set;                // if set=0 the setpoints are not modified
    int64_t current_setpoint;    // in uA
@@ -194,8 +194,8 @@ struct control_data {
 };
 
 // the data structure sent from the PS
-#define RESPONSESIZE 33
-struct response_data {
+#define RESPONSESIZE 36
+struct __attribute__((packed, aligned(4))) response_data {
    uint32_t status;
    int64_t current_setpoint;
    int64_t voltage_setpoint;
@@ -245,14 +245,16 @@ unsigned short csum(unsigned short *ptr, int nbytes)
 #define UDPBUFLEN 256
 void *udp_thread()
 {
+    printf("OpcUaServer : starting UDP thread\n");
+
+    // data structures for receiving UDP packets
     char udp_buffer[UDPBUFLEN];
     struct control_data *in_data;
     static int udp_socket;
     static struct sockaddr_in udp_server;
     static struct sockaddr_in udp_client;
     int slen = sizeof(udp_client);
-    printf("OpcUaServer : starting UDP thread\n");
-    //create a UDP socket
+    // create a UDP socket
     udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (udp_socket == -1)
     {
@@ -264,25 +266,36 @@ void *udp_thread()
     udp_server.sin_family = AF_INET;
     udp_server.sin_port = htons(udpPortNumber);
     udp_server.sin_addr.s_addr = htonl(INADDR_ANY);
-    //bind socket to port
+    // bind socket to port
     if ( bind(udp_socket,(struct sockaddr*)&udp_server, sizeof(udp_server)) == -1 )
     {
         printf("failed to bind socket\n");
         running = false;
     }
+    // set to non-blocking
+    int flags = fcntl(udp_socket, F_GETFL);
+    fcntl(udp_socket, F_SETFL, flags | O_NONBLOCK);
+
+    // data structures for sending response packets
+    struct pseudo_header psh;	        // header for checksum calculation
+    char pseudogram[UDPBUFLEN];	        // datagram for checksum calculation
+    char send_buffer[UDPBUFLEN];	    // UDP send packet buffer
+    // the IP header is at the beginning of the buffer
+    struct iphdr *iph = (struct iphdr *) send_buffer;
+    // the UDP header follows after the IP header
+    struct udphdr *udph = (struct udphdr *) (send_buffer + sizeof(struct iphdr));
+    // pointer to the payload within the data buffer
+    struct response_data *databuffer = (struct response_data *)(send_buffer + sizeof(struct iphdr) + sizeof(struct udphdr));
+
     // the thread continues as long as the OPC server is running
     while (running)
     {
         // be cooperative
         sched_yield();
-        // try to receive some data, this is a blocking call
-        // should be non-blocking, otherwise termination of the server would not terminate this thread
+        // try to receive some data
         int recv_len = recvfrom(udp_socket, udp_buffer, UDPBUFLEN, 0, (struct sockaddr *) &udp_client, &slen);
-        if (recv_len == -1)
-        {
-            printf("error receiving UDP packet\n");
-            running = false;
-        };
+        // if nothing is received
+        if (recv_len == -1) continue;
         udp_counter++;
         if (recv_len!=CONTROLSIZE)
         {
@@ -296,14 +309,76 @@ void *udp_thread()
                 in_data->magic, inet_ntoa(udp_client.sin_addr), ntohs(udp_client.sin_port),CONTROLMAGIC);
             continue;
         }
-        if (in_data->set==0) continue;
-        // send request to server
-        printf(" U = %g\n", 1.0e-6*in_data->voltage_setpoint);
-        printf(" I = %g\n", 1.0e-6*in_data->current_setpoint);
-        sprintf(command,"MWV:%9.6f\r\n",1.0e-6*in_data->voltage_setpoint);
+        if (in_data->set!=0)
+        {
+            // send request to server
+            // printf(" U = %g\n", 1.0e-6*in_data->voltage_setpoint);
+            // printf(" I = %g\n", 1.0e-6*in_data->current_setpoint);
+            sprintf(command,"MWV:%9.6f\r\n",1.0e-6*in_data->voltage_setpoint);
+            TcpSendReceive();
+            sprintf(command,"MWI:%9.6f\r\n",1.0e-6*in_data->current_setpoint);
+            TcpSendReceive();
+        }
+
+        // clear the packet buffer
+        memset(send_buffer, 0, UDPBUFLEN);
+        // collect the response data
+        strcpy(command,"MST\r\n");
         TcpSendReceive();
-        sprintf(command,"MWI:%9.6f\r\n",1.0e-6*in_data->current_setpoint);
+        sscanf(response+5,"%x",&(databuffer->status));
+        strcpy(command,"MWI:?\r\n");
         TcpSendReceive();
+        double isp;
+        sscanf(response+5,"%lf",&isp);
+        databuffer->current_setpoint=(int)round(1e6*isp);
+        strcpy(command,"MWV:?\r\n");
+        TcpSendReceive();
+        double usp;
+        sscanf(response+5,"%lf",&usp);
+        databuffer->voltage_setpoint=(int)round(1e6*usp);
+        strcpy(command,"MRI\r\n");
+        TcpSendReceive();
+        double irb;
+        sscanf(response+5,"%lf",&irb);
+        databuffer->current_value=(int)round(1e6*irb);
+        strcpy(command,"MRV\r\n");
+        TcpSendReceive();
+        double urb;
+        sscanf(response+5,"%lf",&urb);
+        databuffer->voltage_value=(int)round(1e6*urb);
+        // printf("sending UDP response\n");
+        // fill in the IP Header
+        iph->ihl = 5;
+        iph->version = 4;
+        iph->tos = 0;
+        iph->tot_len = sizeof (struct iphdr) + sizeof (struct udphdr) + RESPONSESIZE;
+        iph->id = udp_counter;               // Id of this packet
+        iph->frag_off = 0;
+        iph->ttl = 255;
+        iph->protocol = IPPROTO_UDP;
+        iph->check = 0;			             // set to 0 before calculating checksum
+        iph->saddr = udp_server.sin_addr.s_addr;      // spoof the source IP address
+        iph->daddr = udp_client.sin_addr.s_addr;      // receiver IP address
+        // IP checksum
+        iph->check = csum ((unsigned short *) send_buffer, iph->tot_len);
+        // UDP header
+        udph->source = udp_server.sin_port;
+        udph->dest = udp_client.sin_port;
+        udph->len = htons(8 + RESPONSESIZE);    // tcp header size
+        udph->check = 0;                     // leave checksum 0 now, filled later from pseudo header
+        // now compute the UDP checksum using the pseudo header
+        psh.source_address = udp_server.sin_addr.s_addr;
+        psh.dest_address = udp_client.sin_addr.s_addr;
+        psh.placeholder = 0;
+        psh.protocol = IPPROTO_UDP;
+        psh.udp_length = htons(sizeof(struct udphdr) + RESPONSESIZE );
+        memcpy(pseudogram , (char*) &psh , sizeof (struct pseudo_header));
+        memcpy(pseudogram + sizeof(struct pseudo_header) , udph , sizeof(struct udphdr) + RESPONSESIZE);
+        int psize = sizeof(struct pseudo_header) + sizeof(struct udphdr) + RESPONSESIZE;
+        udph->check = csum( (unsigned short*) pseudogram , psize);
+        //Send the packet
+        sendto (udp_socket, send_buffer, iph->tot_len ,  0, (struct sockaddr *) &udp_client, sizeof (udp_client));
+
     }
     printf("OpcUaServer : UDP thread finished.\n");
 }
@@ -315,7 +390,6 @@ void *udp_thread()
 
 // switch the output on/off
 // handle (pointing at DeviceOutputOn) is interpreted as a boolean on/off information
-bool DeviceOutputOn = 0;
 UA_StatusCode writeDeviceOutputOn(void *handle, const UA_NodeId nodeid,
             const UA_Variant *data, const UA_NumericRange *range) {
     if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_BOOLEAN] && data->data) {
@@ -335,7 +409,22 @@ UA_StatusCode writeDeviceOutputOn(void *handle, const UA_NodeId nodeid,
     return UA_STATUSCODE_GOOD;
 }
 
-unsigned int DeviceStatus = 0;
+UA_StatusCode readDeviceOutputOn( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
+        const UA_NumericRange *range, UA_DataValue *dataValue) {
+    // send status request to server    
+    strcpy(command,"MST\r\n");
+    unsigned int reclen = TcpSendReceive();
+    // convert the answer into a number
+    // first 5 charecters are #MST:
+    unsigned int status;
+    sscanf(response+5,"%x",&status);
+    *(bool *)handle = (status & 1 == 1);
+    // set the variable value
+    dataValue->hasValue = true;
+    UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean *)handle, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    return UA_STATUSCODE_GOOD;
+}
+
 UA_StatusCode readDeviceStatus( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
         const UA_NumericRange *range, UA_DataValue *dataValue) {
     // send request to server    
@@ -343,11 +432,15 @@ UA_StatusCode readDeviceStatus( void *handle, const UA_NodeId nodeid, UA_Boolean
     unsigned int reclen = TcpSendReceive();
     // convert the answer into a number
     // first 5 charecters are #MST:
-    int result = sscanf(response+5,"%x",&DeviceStatus);
-    if (result==0) DeviceStatus = -1;
+    unsigned int status;
+    int result = sscanf(response+5,"%x",&status);
+    if (result==0)
+        *(unsigned int *)handle = -1;
+    else
+        *(unsigned int *)handle = status;
     // set the variable value
     dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, &DeviceStatus, &UA_TYPES[UA_TYPES_UINT32]);
+    UA_Variant_setScalarCopy(&dataValue->value, (unsigned int *)handle, &UA_TYPES[UA_TYPES_UINT32]);
     return UA_STATUSCODE_GOOD;
 }
 
@@ -669,6 +762,7 @@ int main(int argc, char *argv[])
     Device
     |   Name
     |   Status
+    |   OutputOn
     |   MReset
     |   UDP-cnt
     **************************/
@@ -707,6 +801,7 @@ int main(int argc, char *argv[])
 
     // create the DeviceStatus variable
     // read-only
+    unsigned int DeviceStatus = 0;
     UA_VariableAttributes_init(&attr);
     attr.description = UA_LOCALIZEDTEXT("en_US","power supply internal status");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","DeviceStatus");
@@ -726,6 +821,30 @@ int main(int argc, char *argv[])
             UA_NODEID_NULL,
             attr,
             DeviceStatusDataSource,
+            NULL);
+
+    // writing OutputOn as true switches on the device power output
+    // reading returns the value obtained from the status word
+    bool DeviceOutputOn = 0;
+    UA_VariableAttributes_init(&attr);
+    attr.description = UA_LOCALIZEDTEXT("en_US","on/off state of the device output");
+    attr.displayName = UA_LOCALIZEDTEXT("en_US","OutputOn");
+    attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+    UA_DataSource OutputOnDataSource = (UA_DataSource)
+        {
+            .handle = &DeviceOutputOn,
+            .read = readDeviceOutputOn,
+            .write = writeDeviceOutputOn
+        };
+    UA_Server_addDataSourceVariableNode(
+            server,
+            UA_NODEID_NUMERIC(1, 0),
+            DeviceFolder,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_QUALIFIEDNAME(1, "OutputOn"),
+            UA_NODEID_NULL,
+            attr,
+            OutputOnDataSource,
             NULL);
 
     // create the Reset variable
@@ -779,7 +898,6 @@ int main(int argc, char *argv[])
 
     /**************************
     SetPoint
-    |   OutputOn
     |   Voltage
     |   Current
     |   VOltageSetpoint
@@ -799,29 +917,6 @@ int main(int argc, char *argv[])
                             object_attr,                                   // UA_ObjectAttributes attr
                             NULL,                                          // UA_InstantiationCallback *instantiationCallback
                             &SetPointFolder);                                // UA_NodeId *outNewNodeId
-
-    // writing OutputOn as true switches on the device power output
-    // reading returns the stored on/off status
-    UA_VariableAttributes_init(&attr);
-    attr.description = UA_LOCALIZEDTEXT("en_US","on/off state of the device output");
-    attr.displayName = UA_LOCALIZEDTEXT("en_US","OutputOn");
-    attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
-    UA_DataSource OutputOnDataSource = (UA_DataSource)
-        {
-            .handle = &DeviceOutputOn,
-            .read = readBoolean,
-            .write = writeDeviceOutputOn
-        };
-    UA_Server_addDataSourceVariableNode(
-            server,
-            UA_NODEID_NUMERIC(1, 0),
-            SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
-            UA_QUALIFIEDNAME(1, "OutputOn"),
-            UA_NODEID_NULL,
-            attr,
-            OutputOnDataSource,
-            NULL);
 
     double VoltageReadback = 0.0;
     UA_VariableAttributes_init(&attr);
