@@ -25,7 +25,7 @@ cover the whole functionality provided by the devices, only the essentials.
 For faster control loops an additional UDP server was implemented
 which eliminates the protocol overhead associated with OPC UA.
 
-The server receives packets withh the following content:
+The server receives packets with the following content:
 - UInt32 : signature word 0x4C556543 which is checked for the packet to be accepted
 - UInt32 : must be different from 0 to indicate that setpoints should be modified
 - Int64 : current setpoint in uA
