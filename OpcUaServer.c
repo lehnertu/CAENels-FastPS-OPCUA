@@ -13,13 +13,16 @@
  *  
  *  @section Functionality
  *  - Provides an OPC-UA server at TCP/IP port 16664.
+ *  - A server responding to UDP packets at port 16665.
  *  - Access to device data is handled via the provided TCP server (port 10001).
  *  - Server configuration is loadad from file /etc/opcua.xml
  *
- *  The server compiles and runs stabily on the power supply used for the tests.
+ *  The OPC UA server compiles and runs stabily on all power supplies tested.
  *  All functionality necessary to user the supllies to power corrector coils
  *  in an accelerator control system environment is provided. This does not
  *  cover the whole functionality provided by the devices, only the essentials.
+ *
+ *  For faster control an UDP server was implemented listening at port 16665.
  *  
  *  @section Build
  *  The server is built with a cross-compiler running on a Linux system
@@ -59,7 +62,6 @@
  *  - OutputOn should be in the device folder
  *  - evaluate the AK/NAK responses
  *  - error handling when reading the device response, don't just die
- *  - correct setpoint handling (it can be read!)
  *  - VER
  *  - LOOP
  *  - MSAVE
@@ -76,10 +78,12 @@
 #include <stdlib.h>		     // for exit()
 #include <signal.h>		     // for signal()
 #include <errno.h>		     // for error messages
+#include <pthread.h>         // for threads
 
 #include <sys/socket.h>      // for TCP/IP communication
+#include <netinet/udp.h>	 // declarations for udp header
+#include <netinet/ip.h>		 // declarations for ip header
 #include <arpa/inet.h>
-#include <netinet/in.h>
 
 #include <libxml/parser.h>
 #include <libxml/tree.h>
@@ -108,19 +112,17 @@ UA_Logger logger = Logger_Stdout;
     |   Name
     |   Status
     |   MReset
+    |   UDP-cnt
     SetPoint
     |   OutputOn
     |   Voltage
     |   Current
+    |   VoltageSetpoint
     |   CurrentSetpoint
     Parameters
     |   PID_I_Kp_v
     |   ...
 */
-
-// the variable for the current setpoint is defined globally
-// because it has to be known when the output is switched on
-double CurrentSetpoint = 0.0;
 
 // this variable is a flag for the running server
 // when set to false the server stops
@@ -169,6 +171,148 @@ unsigned int TcpSendReceive() {
     return reclen;
 }
 
+/************************************/
+/* UDP communication (fast channel) */
+/************************************/
+
+/*!
+    The application in addition to the OPC UA opens an UDP port.
+    At this port setpoint data are received. Every packet received at this port
+    is answered with a response packet showing the actual operation values.
+    The setpoint package is ignored if set=0 is received but the
+    response still is triggered.
+*/
+
+// the data structure received by the PS
+#define CONTROLSIZE 24
+#define CONTROLMAGIC 0x4C556543
+struct control_data {
+   uint32_t magic;              // signature word
+   uint32_t set;                // if set=0 the setpoints are not modified
+   int64_t current_setpoint;    // in uA
+   int64_t voltage_setpoint;    // in uV
+};
+
+// the data structure sent from the PS
+#define RESPONSESIZE 33
+struct response_data {
+   uint32_t status;
+   int64_t current_setpoint;
+   int64_t voltage_setpoint;
+   int64_t current_value;
+   int64_t voltage_value;
+};
+
+// header structure needed for checksum calculation
+struct pseudo_header
+{
+    u_int32_t source_address;
+    u_int32_t dest_address;
+    u_int8_t placeholder;
+    u_int8_t protocol;
+    u_int16_t udp_length;
+};
+ 
+// data structures for the UDP communication
+unsigned short udpPortNumber;
+static uint64_t udp_counter;            // count received/transmitted packets
+
+// generic checksum calculation function
+unsigned short csum(unsigned short *ptr, int nbytes)
+{
+    register long sum;
+    unsigned short oddbyte;
+    register short answer;
+    sum=0;
+    while(nbytes>1) {
+        sum+=*ptr++;
+        nbytes-=2;
+    }
+    if(nbytes==1) {
+        oddbyte=0;
+        *((unsigned char*)&oddbyte)=*(unsigned char*)ptr;
+        sum+=oddbyte;
+    }
+    sum = (sum>>16)+(sum & 0xffff);
+    sum = sum + (sum>>16);
+    answer=(short)~sum;
+    return(answer);
+}
+
+// This will be forked off as a separate thread.
+// It will listen to the UDP port, process and answer
+// all incoming packets.
+#define UDPBUFLEN 256
+void *udp_thread()
+{
+    char udp_buffer[UDPBUFLEN];
+    struct control_data *in_data;
+    static int udp_socket;
+    static struct sockaddr_in udp_server;
+    static struct sockaddr_in udp_client;
+    int slen = sizeof(udp_client);
+    printf("OpcUaServer : starting UDP thread\n");
+    //create a UDP socket
+    udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udp_socket == -1)
+    {
+        printf("failed to create socket\n");
+        running = false;
+    }
+    // zero out the structure
+    memset((char *) &udp_server, 0, sizeof(udp_server));
+    udp_server.sin_family = AF_INET;
+    udp_server.sin_port = htons(udpPortNumber);
+    udp_server.sin_addr.s_addr = htonl(INADDR_ANY);
+    //bind socket to port
+    if ( bind(udp_socket,(struct sockaddr*)&udp_server, sizeof(udp_server)) == -1 )
+    {
+        printf("failed to bind socket\n");
+        running = false;
+    }
+    // the thread continues as long as the OPC server is running
+    while (running)
+    {
+        // be cooperative
+        sched_yield();
+        // try to receive some data, this is a blocking call
+        // should be non-blocking, otherwise termination of the server would not terminate this thread
+        int recv_len = recvfrom(udp_socket, udp_buffer, UDPBUFLEN, 0, (struct sockaddr *) &udp_client, &slen);
+        if (recv_len == -1)
+        {
+            printf("error receiving UDP packet\n");
+            running = false;
+        };
+        udp_counter++;
+        if (recv_len!=CONTROLSIZE)
+        {
+            printf("Received unknown packet from %s:%d\n", inet_ntoa(udp_client.sin_addr), ntohs(udp_client.sin_port));
+            continue;
+        }
+        in_data = (struct control_data *) udp_buffer;
+        if (in_data->magic != CONTROLMAGIC)
+        {
+            printf("Received wrong magic %d from %s:%d, should be %d \n",
+                in_data->magic, inet_ntoa(udp_client.sin_addr), ntohs(udp_client.sin_port),CONTROLMAGIC);
+            continue;
+        }
+        if (in_data->set==0) continue;
+        // send request to server
+        printf(" U = %g\n", 1.0e-6*in_data->voltage_setpoint);
+        printf(" I = %g\n", 1.0e-6*in_data->current_setpoint);
+        sprintf(command,"MWV:%9.6f\r\n",1.0e-6*in_data->voltage_setpoint);
+        TcpSendReceive();
+        sprintf(command,"MWI:%9.6f\r\n",1.0e-6*in_data->current_setpoint);
+        TcpSendReceive();
+    }
+    printf("OpcUaServer : UDP thread finished.\n");
+}
+
+/***********************************/
+/* specialized read/write methods  */
+/* for PS specific variables       */
+/***********************************/
+
 // switch the output on/off
 // handle (pointing at DeviceOutputOn) is interpreted as a boolean on/off information
 bool DeviceOutputOn = 0;
@@ -181,11 +325,6 @@ UA_StatusCode writeDeviceOutputOn(void *handle, const UA_NodeId nodeid,
         // switch on the output
         UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "MON");
         strcpy(command,"MON\r\n");
-        TcpSendReceive();
-        // update the current setpoint
-        // sprintf(command,"MWI:%9.6f",CurrentSetpoint);
-        // UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
-        sprintf(command,"MWI:%9.6f\r\n",CurrentSetpoint);
         TcpSendReceive();
     } else {
         // switch off the output
@@ -237,7 +376,13 @@ UA_StatusCode readCurrent( void *handle, const UA_NodeId nodeid, UA_Boolean sour
     unsigned int reclen = TcpSendReceive();
     // convert buffer to numerical value
     // first 5 charecters are #MRI:
-    int result = sscanf(response+5,"%lf",(double *)handle);
+    if(strncmp(response,"#MRI:",5)==0)
+        sscanf(response+5,"%lf",(double *)handle);
+    else
+    {
+        printf("wrong MRI response : %s",response);
+        *(double *)handle = 999.999;
+    }
     // set the variable value
     dataValue->hasValue = true;
     UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
@@ -258,6 +403,25 @@ UA_StatusCode writeCurrent(void *handle, const UA_NodeId nodeid,
     return UA_STATUSCODE_GOOD;
 }
 
+// callback routine for reading the current setpoint
+// this only works if the output is on, otherwise #NAK:13 is answered
+UA_StatusCode readCurrentSetpoint( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
+        const UA_NumericRange *range, UA_DataValue *dataValue) {
+    // send request to server    
+    strcpy(command,"MWI:?\r\n");
+    unsigned int reclen = TcpSendReceive();
+    // convert buffer to numerical value
+    // first 5 charecters are #MWI:
+    if(strncmp(response,"#MWI:",5)==0)
+        sscanf(response+5,"%lf",(double *)handle);
+    else
+        *(double *)handle = 999.999;
+    // set the variable value
+    dataValue->hasValue = true;
+    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
+    return UA_STATUSCODE_GOOD;
+}
+
 // callback routine for reading the voltage value
 UA_StatusCode readVoltage( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
         const UA_NumericRange *range, UA_DataValue *dataValue) {
@@ -267,6 +431,10 @@ UA_StatusCode readVoltage( void *handle, const UA_NodeId nodeid, UA_Boolean sour
     unsigned int reclen = TcpSendReceive();
     // convert buffer to numerical value
     // first 5 charecters are #MRV:
+    if(strncmp(response,"#MRV:",5)==0)
+        sscanf(response+5,"%lf",(double *)handle);
+    else
+        *(double *)handle = 999.999;
     int result = sscanf(response+5,"%lf",(double *)handle);
     // set the variable value
     dataValue->hasValue = true;
@@ -285,6 +453,25 @@ UA_StatusCode writeVoltage(void *handle, const UA_NodeId nodeid,
     sprintf(command,"MWV:%9.6f\r\n",*(double *)handle);
     // UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
     TcpSendReceive();
+    return UA_STATUSCODE_GOOD;
+}
+
+// callback routine for reading the voltage setpoint
+// this only works if the output is on, otherwise #NAK:13 is answered
+UA_StatusCode readVoltageSetpoint( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
+        const UA_NumericRange *range, UA_DataValue *dataValue) {
+    // send request to server    
+    strcpy(command,"MWV:?\r\n");
+    unsigned int reclen = TcpSendReceive();
+    // convert buffer to numerical value
+    // first 5 charecters are #MWV:
+    if(strncmp(response,"#MWV:",5)==0)
+        sscanf(response+5,"%lf",(double *)handle);
+    else
+        *(double *)handle = 999.999;
+    // set the variable value
+    dataValue->hasValue = true;
+    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
     return UA_STATUSCODE_GOOD;
 }
 
@@ -334,6 +521,13 @@ UA_StatusCode readBoolean( void *handle, const UA_NodeId nodeid, UA_Boolean sour
     // set the variable value
     dataValue->hasValue = true;
     UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean*)handle, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode readUInt64( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
+            const UA_NumericRange *range, UA_DataValue *dataValue) {
+    dataValue->hasValue = true;
+    UA_Variant_setScalarCopy(&dataValue->value, (UA_UInt64*)handle, &UA_TYPES[UA_TYPES_UINT64]);
     return UA_STATUSCODE_GOOD;
 }
 
@@ -400,6 +594,23 @@ int main(int argc, char *argv[])
     if (sscanf(buf,"%d",&serverPortNumber)<1)
         Die("OpcUaServer : Failed to interpret <opcua> port property\n");
     printf("OpcUaServer : OPC-UA port=%d\n", serverPortNumber);
+    // find the udp node
+    xmlNode *udpNode = NULL;
+    for (xmlNode *currNode = configurationNode->children; currNode; currNode = currNode->next)
+        if (currNode->type == XML_ELEMENT_NODE)
+            if (! strcmp(currNode->name, "udp"))
+                udpNode = currNode;
+    if (udpNode == NULL)
+        Die("OpcUaServer : Failed to find XML <udp> node\n");
+    // read the port number
+    xmlChar *udpProp = xmlGetProp(udpNode,"port");
+    buflen = xmlStrPrintf(buf, 80, "%s", udpProp);
+    if (buflen == 0)
+        Die("OpcUaServer : Failed to read XML <udp> port property\n");
+    buf[buflen] = '\0';         // string termination
+    if (sscanf(buf,"%d",&udpPortNumber)<1)
+        Die("OpcUaServer : Failed to interpret <udp> port property\n");
+    printf("OpcUaServer : UDP port=%d\n", udpPortNumber);
     // find the device node
     xmlNode *deviceNode = NULL;
     for (xmlNode *currNode = configurationNode->children; currNode; currNode = currNode->next)
@@ -459,6 +670,7 @@ int main(int argc, char *argv[])
     |   Name
     |   Status
     |   MReset
+    |   UDP-cnt
     **************************/
 
     // create the folder
@@ -542,11 +754,35 @@ int main(int argc, char *argv[])
             DeviceMResetDataSource,
             NULL);
 
+    // create the UDP counter variable
+    // read-only
+    UA_VariableAttributes_init(&attr);
+    attr.description = UA_LOCALIZEDTEXT("en_US","UDP packet counter");
+    attr.displayName = UA_LOCALIZEDTEXT("en_US","UDP-cnt");
+    attr.accessLevel = UA_ACCESSLEVELMASK_READ;
+    UA_DataSource UDPcntDataSource = (UA_DataSource)
+        {
+            .handle = &udp_counter,
+            .read = readUInt64,
+            .write = 0
+        };
+    UA_Server_addDataSourceVariableNode(
+            server,
+            UA_NODEID_NUMERIC(1, 0),
+            DeviceFolder,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_QUALIFIEDNAME(1, "UDP_cnt"),
+            UA_NODEID_NULL,
+            attr,
+            UDPcntDataSource,
+            NULL);
+
     /**************************
     SetPoint
     |   OutputOn
     |   Voltage
     |   Current
+    |   VOltageSetpoint
     |   CurrentSetpoint
     **************************/
 
@@ -564,6 +800,8 @@ int main(int argc, char *argv[])
                             NULL,                                          // UA_InstantiationCallback *instantiationCallback
                             &SetPointFolder);                                // UA_NodeId *outNewNodeId
 
+    // writing OutputOn as true switches on the device power output
+    // reading returns the stored on/off status
     UA_VariableAttributes_init(&attr);
     attr.description = UA_LOCALIZEDTEXT("en_US","on/off state of the device output");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","OutputOn");
@@ -583,28 +821,6 @@ int main(int argc, char *argv[])
             UA_NODEID_NULL,
             attr,
             OutputOnDataSource,
-            NULL);
-
-    double CurrentReadback = 0.0;
-    UA_VariableAttributes_init(&attr);
-    attr.description = UA_LOCALIZEDTEXT("en_US","current readback [A]");
-    attr.displayName = UA_LOCALIZEDTEXT("en_US","Current");
-    attr.accessLevel = UA_ACCESSLEVELMASK_READ;
-    UA_DataSource CurrentDataSource = (UA_DataSource)
-        {
-            .handle = &CurrentReadback,
-            .read = readCurrent,
-            .write = 0
-        };
-    UA_Server_addDataSourceVariableNode(
-            server,
-            UA_NODEID_NUMERIC(1, 0),
-            SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
-            UA_QUALIFIEDNAME(1, "Current"),
-            UA_NODEID_NULL,
-            attr,
-            CurrentDataSource,
             NULL);
 
     double VoltageReadback = 0.0;
@@ -629,11 +845,60 @@ int main(int argc, char *argv[])
             VoltageDataSource,
             NULL);
 
-    // the variable for the current setpoint is defined globally
-    // because it has to be known when the output is switched on
+    double CurrentReadback = 0.0;
+    UA_VariableAttributes_init(&attr);
+    attr.description = UA_LOCALIZEDTEXT("en_US","current readback [A]");
+    attr.displayName = UA_LOCALIZEDTEXT("en_US","Current");
+    attr.accessLevel = UA_ACCESSLEVELMASK_READ;
+    UA_DataSource CurrentDataSource = (UA_DataSource)
+        {
+            .handle = &CurrentReadback,
+            .read = readCurrent,
+            .write = 0
+        };
+    UA_Server_addDataSourceVariableNode(
+            server,
+            UA_NODEID_NUMERIC(1, 0),
+            SetPointFolder,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_QUALIFIEDNAME(1, "Current"),
+            UA_NODEID_NULL,
+            attr,
+            CurrentDataSource,
+            NULL);
+
+    // when the setpoint is written, the voltage setting in the device is updated
+    // (the special writeVoltage() callback is used for that)
+    // reading the setpoint returns the active setpoint value
+    // as read from the device
+    // (the special readVoltageSetpoint() callback is used for that)
+    double VoltageSetpoint = 0.0;
+    UA_VariableAttributes_init(&attr);
+    attr.description = UA_LOCALIZEDTEXT("en_US","voltage setpoint [V]");
+    attr.displayName = UA_LOCALIZEDTEXT("en_US","VoltageSetpoint");
+    attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+    UA_DataSource VoltageSetpointDataSource = (UA_DataSource)
+        {
+            .handle = &VoltageSetpoint,
+            .read = readVoltageSetpoint,
+            .write = writeVoltage
+        };
+    UA_Server_addDataSourceVariableNode(
+            server,
+            UA_NODEID_NUMERIC(1, 0),
+            SetPointFolder,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_QUALIFIEDNAME(1, "VoltageSetpoint"),
+            UA_NODEID_NULL,
+            attr,
+            VoltageSetpointDataSource,
+            NULL);
+
     // when the setpoint is written, the current setting in the device is updated
     // (the special writeCurrent() callback is used for that)
-    // reading the setpoint only returns the stored setpoint value
+    // reading the setpoint returns the active setpoint value
+    // as read from the device
+    double CurrentSetpoint = 0.0;
     UA_VariableAttributes_init(&attr);
     attr.description = UA_LOCALIZEDTEXT("en_US","current setpoint [A]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","CurrentSetpoint");
@@ -641,7 +906,7 @@ int main(int argc, char *argv[])
     UA_DataSource CurrentSetpointDataSource = (UA_DataSource)
         {
             .handle = &CurrentSetpoint,
-            .read = readDouble,
+            .read = readCurrentSetpoint,
             .write = writeCurrent
         };
     UA_Server_addDataSourceVariableNode(
@@ -740,6 +1005,10 @@ int main(int argc, char *argv[])
     xmlFreeDoc(doc);
     xmlCleanupParser();
 
+    // start the UDP thread
+    pthread_t UDPthread;
+    pthread_create (&UDPthread, NULL, udp_thread, NULL);
+
     // run the server (forever unless stopped with ctrl-C)
     UA_StatusCode retval = UA_Server_run(server, &running);
 
@@ -748,6 +1017,7 @@ int main(int argc, char *argv[])
     UA_Server_delete(server);
     nl.deleteMembers(&nl);
 
+    pthread_join (UDPthread, NULL);
     close(sock);
 
     printf("OpcUaServer : graceful exit\n");

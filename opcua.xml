@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
     <opcua port="16664"/>
+    <udp port="16665"/>
     <device name="LA1-MFH.01"/>
     <parameters>
         <register number="31" name="CurrSlewRate" description="default current slew rate [A/s]"/>
