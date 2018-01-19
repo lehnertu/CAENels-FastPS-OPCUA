@@ -12,16 +12,35 @@ open source implementation of OPC UA.
 
 Functionality
 =============
+
 - Provides an OPC-UA server at TCP/IP port 16664.
+- A server responding to UDP packets is listening at port 16665.
 - Access to device data is handled via the provided TCP server (port 10001).
 - Server configuration is loadad from file /etc/opcua.xml
 
+All functionality necessary to user the supllies to power corrector coils
+in an accelerator control system environment is provided via OPC UA. This does not
+cover the whole functionality provided by the devices, only the essentials.
+
+For faster control loops an additional UDP server was implemented
+which eliminates the protocol overhead associated with OPC UA.
+
+The server receives packets withh the following content:
+- UInt32 : signature word 0x4C556543 which is checked for the packet to be accepted
+- UInt32 : must be different from 0 to indicate that setpoints should be modified
+- Int64 : current setpoint in uA
+- Int64 : voltage setpoint in uV
+
+Every received packet showing the correct signature is answered with another packet showing:
+- UInt32 : device status word
+- Int64 : current setpoint in uA
+- Int64 : voltage setpoint in uV
+- Int64 : current readback in uA
+- Int64 : voltage readback in uV
+
 Project status
 ==============
-The server compiles and runs stabily on the power supply used for the tests.
-All functionality necessary to user the supllies to power corrector coils
-in an accelerator control system environment is provided. This does not
-cover the whole functionality provided by the devices, only the essentials.
+The server compiles and runs stabily on all power supplies used for the tests.
 
 Build the server
 ================
