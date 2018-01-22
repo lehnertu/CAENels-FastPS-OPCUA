@@ -13,7 +13,6 @@
  *  
  *  @section Functionality
  *  - Provides an OPC-UA server at TCP/IP port 16664.
- *  - A server responding to UDP packets at port 16665.
  *  - Access to device data is handled via the provided TCP server (port 10001).
  *  - Server configuration is loadad from file /etc/opcua.xml
  *
@@ -23,6 +22,7 @@
  *  cover the whole functionality provided by the devices, only the essentials.
  *
  *  For faster control an UDP server was implemented listening at port 16665.
+ *  This is now provided as a separate binary.
  *  
  *  @section Build
  *  The server is built with a cross-compiler running on a Linux system
@@ -41,7 +41,7 @@
  *  - source ../tools/environment
  *  - $CC -std=c99 -c open62541.c
  *  - $CC -std=c99 -c -I $SDKTARGETSYSROOT/usr/include/libxml2/ OpcUaServer.c
- *  - $CXX -o opcuaserver OpcUaServer.o open62541.o -lpthread -lxml2
+ *  - $CXX -o opcuaserver OpcUaServer.o open62541.o -lxml2
  *
  *  @section Installation
  *  For istallation a few files need to be copied onto the device:
@@ -58,7 +58,6 @@
  *  A LabView client demonstrating the access using OPC UA is provided in the examples/ folder.
  *
  *  @section TODO
- *  - OPC UA and UDP requests may conflict in their access to the TCP/IP server
  *  - evaluate the AK/NAK responses
  *  - error handling when reading the device response, don't just die
  *  - VER
@@ -77,7 +76,6 @@
 #include <stdlib.h>		     // for exit()
 #include <signal.h>		     // for signal()
 #include <errno.h>		     // for error messages
-#include <pthread.h>         // for threads
 #include <math.h>
 
 #include <sys/socket.h>      // for TCP/IP communication
@@ -113,7 +111,6 @@ UA_Logger logger = Logger_Stdout;
     |   Status
     |   OutputOn
     |   MReset
-    |   UDP-cnt
     SetPoint
     |   Voltage
     |   Current
@@ -169,218 +166,6 @@ unsigned int TcpSendReceive() {
     reclen = recv(sock, response, BUFSIZE-1, 0);
     response[reclen] = '\0';			// assure null terminated string
     return reclen;
-}
-
-/************************************/
-/* UDP communication (fast channel) */
-/************************************/
-
-/*!
-    The application in addition to the OPC UA opens an UDP port.
-    At this port setpoint data are received. Every packet received at this port
-    is answered with a response packet showing the actual operation values.
-    The setpoint package is ignored if set=0 is received but the
-    response still is triggered.
-*/
-
-// the data structure received by the PS
-#define CONTROLSIZE 24
-#define CONTROLMAGIC 0x4C556543
-struct __attribute__((packed, aligned(4))) control_data {
-   uint32_t magic;              // signature word
-   uint32_t set;                // if set=0 the setpoints are not modified
-   int64_t current_setpoint;    // in uA
-   int64_t voltage_setpoint;    // in uV
-};
-
-// the data structure sent from the PS
-#define RESPONSESIZE 36
-struct __attribute__((packed, aligned(4))) response_data {
-   uint32_t status;
-   int64_t current_setpoint;
-   int64_t voltage_setpoint;
-   int64_t current_value;
-   int64_t voltage_value;
-};
-
-// header structure needed for checksum calculation
-struct pseudo_header
-{
-    u_int32_t source_address;
-    u_int32_t dest_address;
-    u_int8_t placeholder;
-    u_int8_t protocol;
-    u_int16_t udp_length;
-};
- 
-// data structures for the UDP communication
-unsigned short udpPortNumber;
-static uint64_t udp_counter;            // count received/transmitted packets
-
-// generic checksum calculation function
-unsigned short csum(unsigned short *ptr, int nbytes)
-{
-    register long sum;
-    unsigned short oddbyte;
-    register short answer;
-    sum=0;
-    while(nbytes>1) {
-        sum+=*ptr++;
-        nbytes-=2;
-    }
-    if(nbytes==1) {
-        oddbyte=0;
-        *((unsigned char*)&oddbyte)=*(unsigned char*)ptr;
-        sum+=oddbyte;
-    }
-    sum = (sum>>16)+(sum & 0xffff);
-    sum = sum + (sum>>16);
-    answer=(short)~sum;
-    return(answer);
-}
-
-// This will be forked off as a separate thread.
-// It will listen to the UDP port, process and answer
-// all incoming packets.
-#define UDPBUFLEN 256
-void *udp_thread()
-{
-    printf("OpcUaServer : starting UDP thread\n");
-
-    // data structures for receiving UDP packets
-    char udp_buffer[UDPBUFLEN];
-    struct control_data *in_data;
-    static int udp_socket;
-    static struct sockaddr_in udp_server;
-    static struct sockaddr_in udp_client;
-    int slen = sizeof(udp_client);
-    // create a UDP socket
-    udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (udp_socket == -1)
-    {
-        printf("failed to create socket\n");
-        running = false;
-    }
-    // zero out the structure
-    memset((char *) &udp_server, 0, sizeof(udp_server));
-    udp_server.sin_family = AF_INET;
-    udp_server.sin_port = htons(udpPortNumber);
-    udp_server.sin_addr.s_addr = htonl(INADDR_ANY);
-    // bind socket to port
-    if ( bind(udp_socket,(struct sockaddr*)&udp_server, sizeof(udp_server)) == -1 )
-    {
-        printf("failed to bind socket\n");
-        running = false;
-    }
-    // set to non-blocking
-    int flags = fcntl(udp_socket, F_GETFL);
-    fcntl(udp_socket, F_SETFL, flags | O_NONBLOCK);
-
-    // data structures for sending response packets
-    struct pseudo_header psh;	        // header for checksum calculation
-    char pseudogram[UDPBUFLEN];	        // datagram for checksum calculation
-    char send_buffer[UDPBUFLEN];	    // UDP send packet buffer
-    // the IP header is at the beginning of the buffer
-    struct iphdr *iph = (struct iphdr *) send_buffer;
-    // the UDP header follows after the IP header
-    struct udphdr *udph = (struct udphdr *) (send_buffer + sizeof(struct iphdr));
-    // pointer to the payload within the data buffer
-    struct response_data *databuffer = (struct response_data *)(send_buffer + sizeof(struct iphdr) + sizeof(struct udphdr));
-
-    // the thread continues as long as the OPC server is running
-    while (running)
-    {
-        // be cooperative
-        sched_yield();
-        // try to receive some data
-        int recv_len = recvfrom(udp_socket, udp_buffer, UDPBUFLEN, 0, (struct sockaddr *) &udp_client, &slen);
-        // if nothing is received
-        if (recv_len == -1) continue;
-        udp_counter++;
-        if (recv_len!=CONTROLSIZE)
-        {
-            printf("Received unknown packet from %s:%d\n", inet_ntoa(udp_client.sin_addr), ntohs(udp_client.sin_port));
-            continue;
-        }
-        in_data = (struct control_data *) udp_buffer;
-        if (in_data->magic != CONTROLMAGIC)
-        {
-            printf("Received wrong magic %d from %s:%d, should be %d \n",
-                in_data->magic, inet_ntoa(udp_client.sin_addr), ntohs(udp_client.sin_port),CONTROLMAGIC);
-            continue;
-        }
-        if (in_data->set!=0)
-        {
-            // send request to server
-            // printf(" U = %g\n", 1.0e-6*in_data->voltage_setpoint);
-            // printf(" I = %g\n", 1.0e-6*in_data->current_setpoint);
-            sprintf(command,"MWV:%9.6f\r\n",1.0e-6*in_data->voltage_setpoint);
-            TcpSendReceive();
-            sprintf(command,"MWI:%9.6f\r\n",1.0e-6*in_data->current_setpoint);
-            TcpSendReceive();
-        }
-
-        // clear the packet buffer
-        memset(send_buffer, 0, UDPBUFLEN);
-        // collect the response data
-        strcpy(command,"MST\r\n");
-        TcpSendReceive();
-        sscanf(response+5,"%x",&(databuffer->status));
-        strcpy(command,"MWI:?\r\n");
-        TcpSendReceive();
-        double isp;
-        sscanf(response+5,"%lf",&isp);
-        databuffer->current_setpoint=(int)round(1e6*isp);
-        strcpy(command,"MWV:?\r\n");
-        TcpSendReceive();
-        double usp;
-        sscanf(response+5,"%lf",&usp);
-        databuffer->voltage_setpoint=(int)round(1e6*usp);
-        strcpy(command,"MRI\r\n");
-        TcpSendReceive();
-        double irb;
-        sscanf(response+5,"%lf",&irb);
-        databuffer->current_value=(int)round(1e6*irb);
-        strcpy(command,"MRV\r\n");
-        TcpSendReceive();
-        double urb;
-        sscanf(response+5,"%lf",&urb);
-        databuffer->voltage_value=(int)round(1e6*urb);
-        // printf("sending UDP response\n");
-        // fill in the IP Header
-        iph->ihl = 5;
-        iph->version = 4;
-        iph->tos = 0;
-        iph->tot_len = sizeof (struct iphdr) + sizeof (struct udphdr) + RESPONSESIZE;
-        iph->id = udp_counter;               // Id of this packet
-        iph->frag_off = 0;
-        iph->ttl = 255;
-        iph->protocol = IPPROTO_UDP;
-        iph->check = 0;			             // set to 0 before calculating checksum
-        iph->saddr = udp_server.sin_addr.s_addr;      // spoof the source IP address
-        iph->daddr = udp_client.sin_addr.s_addr;      // receiver IP address
-        // IP checksum
-        iph->check = csum ((unsigned short *) send_buffer, iph->tot_len);
-        // UDP header
-        udph->source = udp_server.sin_port;
-        udph->dest = udp_client.sin_port;
-        udph->len = htons(8 + RESPONSESIZE);    // tcp header size
-        udph->check = 0;                     // leave checksum 0 now, filled later from pseudo header
-        // now compute the UDP checksum using the pseudo header
-        psh.source_address = udp_server.sin_addr.s_addr;
-        psh.dest_address = udp_client.sin_addr.s_addr;
-        psh.placeholder = 0;
-        psh.protocol = IPPROTO_UDP;
-        psh.udp_length = htons(sizeof(struct udphdr) + RESPONSESIZE );
-        memcpy(pseudogram , (char*) &psh , sizeof (struct pseudo_header));
-        memcpy(pseudogram + sizeof(struct pseudo_header) , udph , sizeof(struct udphdr) + RESPONSESIZE);
-        int psize = sizeof(struct pseudo_header) + sizeof(struct udphdr) + RESPONSESIZE;
-        udph->check = csum( (unsigned short*) pseudogram , psize);
-        //Send the packet
-        sendto (udp_socket, send_buffer, iph->tot_len ,  0, (struct sockaddr *) &udp_client, sizeof (udp_client));
-
-    }
-    printf("OpcUaServer : UDP thread finished.\n");
 }
 
 /***********************************/
@@ -687,23 +472,6 @@ int main(int argc, char *argv[])
     if (sscanf(buf,"%d",&serverPortNumber)<1)
         Die("OpcUaServer : Failed to interpret <opcua> port property\n");
     printf("OpcUaServer : OPC-UA port=%d\n", serverPortNumber);
-    // find the udp node
-    xmlNode *udpNode = NULL;
-    for (xmlNode *currNode = configurationNode->children; currNode; currNode = currNode->next)
-        if (currNode->type == XML_ELEMENT_NODE)
-            if (! strcmp(currNode->name, "udp"))
-                udpNode = currNode;
-    if (udpNode == NULL)
-        Die("OpcUaServer : Failed to find XML <udp> node\n");
-    // read the port number
-    xmlChar *udpProp = xmlGetProp(udpNode,"port");
-    buflen = xmlStrPrintf(buf, 80, "%s", udpProp);
-    if (buflen == 0)
-        Die("OpcUaServer : Failed to read XML <udp> port property\n");
-    buf[buflen] = '\0';         // string termination
-    if (sscanf(buf,"%d",&udpPortNumber)<1)
-        Die("OpcUaServer : Failed to interpret <udp> port property\n");
-    printf("OpcUaServer : UDP port=%d\n", udpPortNumber);
     // find the device node
     xmlNode *deviceNode = NULL;
     for (xmlNode *currNode = configurationNode->children; currNode; currNode = currNode->next)
@@ -764,7 +532,6 @@ int main(int argc, char *argv[])
     |   Status
     |   OutputOn
     |   MReset
-    |   UDP-cnt
     **************************/
 
     // create the folder
@@ -871,29 +638,6 @@ int main(int argc, char *argv[])
             UA_NODEID_NULL,
             attr,
             DeviceMResetDataSource,
-            NULL);
-
-    // create the UDP counter variable
-    // read-only
-    UA_VariableAttributes_init(&attr);
-    attr.description = UA_LOCALIZEDTEXT("en_US","UDP packet counter");
-    attr.displayName = UA_LOCALIZEDTEXT("en_US","UDP-cnt");
-    attr.accessLevel = UA_ACCESSLEVELMASK_READ;
-    UA_DataSource UDPcntDataSource = (UA_DataSource)
-        {
-            .handle = &udp_counter,
-            .read = readUInt64,
-            .write = 0
-        };
-    UA_Server_addDataSourceVariableNode(
-            server,
-            UA_NODEID_NUMERIC(1, 0),
-            DeviceFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
-            UA_QUALIFIEDNAME(1, "UDP_cnt"),
-            UA_NODEID_NULL,
-            attr,
-            UDPcntDataSource,
             NULL);
 
     /**************************
@@ -1100,10 +844,6 @@ int main(int argc, char *argv[])
     xmlFreeDoc(doc);
     xmlCleanupParser();
 
-    // start the UDP thread
-    pthread_t UDPthread;
-    pthread_create (&UDPthread, NULL, udp_thread, NULL);
-
     // run the server (forever unless stopped with ctrl-C)
     UA_StatusCode retval = UA_Server_run(server, &running);
 
@@ -1112,7 +852,6 @@ int main(int argc, char *argv[])
     UA_Server_delete(server);
     nl.deleteMembers(&nl);
 
-    pthread_join (UDPthread, NULL);
     close(sock);
 
     printf("OpcUaServer : graceful exit\n");
