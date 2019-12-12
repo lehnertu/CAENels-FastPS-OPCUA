@@ -7,7 +7,10 @@ This is an OPC UA server running on the CAENels
 [FAST-PS](http://www.caenels.com/products/fast-ps/) power supplies
 for remote control of the devices.
 
-It is based on the [Open62541](https://github.com/open62541/open62541/)
+The sources can be obtained from the github repository
+git clone https://github.com/lehnertu/CAENels-FastPS-OPCUA.git
+
+The server is based on the [Open62541](https://github.com/open62541/open62541/)
 open source implementation of OPC UA.
 
 Functionality
