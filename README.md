@@ -74,6 +74,13 @@ For istallation a few files need to be copied onto the device:
 
 The server can then be run by executing /tmp/opcuaserver.
 
+For an automatic start at bootup the startup script has to be installed as follows:
+$ scp opcua-startup root@10.66.67.10:/etc/init.d/
+A link has to be set in the startup script directory:
+$ ssh root@10.66.67.10
+$ cd /etc/rc5.d/
+$ ln -s ../init.d/opcua-startup S99z-opcua-startup
+
 Testing
 =======
 For a first test of the server an universal OPC UA client like
