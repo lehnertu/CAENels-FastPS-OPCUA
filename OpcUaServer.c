@@ -258,7 +258,7 @@ UA_StatusCode readCurrent( void *handle, const UA_NodeId nodeid, UA_Boolean sour
         sscanf(response+5,"%lf",(double *)handle);
     else
     {
-        printf("wrong MRI response : %s",response);
+        // printf("wrong MRI response : %s",response);
         *(double *)handle = 999.999;
     }
     // set the variable value
@@ -385,6 +385,7 @@ UA_StatusCode writeRegister(void *handle, const UA_NodeId nodeid,
         // send request to server
         sprintf(command,"MWG:%d:%lf\r\n",index,value);
         TcpSendReceive();
+        printf("MWG response : %s",response);
     }
     return UA_STATUSCODE_GOOD;
 }

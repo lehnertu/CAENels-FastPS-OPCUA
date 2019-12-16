@@ -45,6 +45,12 @@ Project status
 ==============
 The server compiles and runs stabily on all power supplies used for the tests.
 
+TODO:
+- update to Open62541 V1.0
+- reasonable error handling
+- wait until TCP server becomes available, don't die immediately
+- mreset should always read false
+
 Build the server
 ================
 The server is built with a cross-compiler running on a Linux system
@@ -65,12 +71,16 @@ A makefile is not yet provided, just a few lines are required to build the serve
 - $CC -std=c99 -c -I $SDKTARGETSYSROOT/usr/include/libxml2/ OpcUaServer.c
 - $CXX -o opcuaserver OpcUaServer.o open62541.o -lpthread -lxml2
 
+if dynamic linking is used a compatible version of libxml2.so has to be installed onto the target
+alternative static linking of xml library
+$CXX -o opcuaserver OpcUaServer.o open62541.o $SDKTARGETSYSROOT/usr/lib/libxml2.a -lpthread
+
 Installation
 ============
 For istallation a few files need to be copied onto the device:
 - opcuaserver binary installed in /tmp/ for testing
 - opcua.xml configuration file in /etc/
-- libxml2.so.2 in /usr/lib/
+- libxml2.so.2 in /usr/lib/ (if not static link)
 
 The server can then be run by executing /tmp/opcuaserver.
 
