@@ -11,7 +11,7 @@ The sources can be obtained from the github repository
 git clone https://github.com/lehnertu/CAENels-FastPS-OPCUA.git
 
 The server is based on the [Open62541](https://github.com/open62541/open62541/)
-open source implementation of OPC UA.
+open source implementation of OPC UA. We now use the taggged 1.0 branch of the library.
 
 Functionality
 =============
