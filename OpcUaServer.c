@@ -1,6 +1,6 @@
 /** @mainpage OpcUaServer for the CAENels FAST-PS power supplies
  *
- *  Version 0.2  27.1.2017
+ *  Version 1.1  18.12.2019
  *
  *  @author U. Lehnert, Helmholtz-Zentrum Dresden-Rossendorf
  *
@@ -16,53 +16,19 @@
  *  - Access to device data is handled via the provided TCP server (port 10001).
  *  - Server configuration is loadad from file /etc/opcua.xml
  *
- *  The OPC UA server compiles and runs stabily on all power supplies tested.
- *  All functionality necessary to user the supllies to power corrector coils
- *  in an accelerator control system environment is provided. This does not
- *  cover the whole functionality provided by the devices, only the essentials.
- *
- *  For faster control an UDP server was implemented listening at port 16665.
- *  This is now provided as a separate binary.
- *  
  *  @section Build
- *  The server is built with a cross-compiler running on a Linux system
- *  for the ARM target CPU of the power supplies.
- *  
- *  The OPC UA stack needs to be downloaded and built. This can be done on
- *  the development system - there is no binary code produced at this stage.
- *  The complete stack is obtained in two (amalgamated) files.
- *  - open62541.h
- *  - open62541.c
- *  
- *  In addition the libxml2 library is required. It needs to be built
- *  and installed into the cross-target tool chain.
- *  
- *  A makefile is not yet provided, just a few lines are required to build the server.
- *  - source ../tools/environment
- *  - $CC -std=c99 -c open62541.c
- *  - $CC -std=c99 -c -I $SDKTARGETSYSROOT/usr/include/libxml2/ OpcUaServer.c
- *  - $CXX -o opcuaserver OpcUaServer.o open62541.o -lxml2
+ *  Refer to README.md
  *
  *  @section Installation
- *  For istallation a few files need to be copied onto the device:
- *  - opcuaserver binary installed in /tmp/ for testing
+ *  For istallation two files need to be copied onto the device:
+ *  - opcuaserver binary installed in /opt/
  *  - opcua.xml configuration file in /etc/
- *  - libxml2.so.2 in /usr/lib/
  *
- *  The server can then be run by executing /tmp/opcuaserver.
+ *  The server can then be run by executing /opt/opcuaserver.
  * 
  *  @section Testing
  *  For a first test of the server an universal OPC UA client like
  *  [UaExpert](https://www.unified-automation.com/products/development-tools/uaexpert.html) is recommended.
- *
- *  A LabView client demonstrating the access using OPC UA is provided in the examples/ folder.
- *
- *  @section TODO
- *  - evaluate the AK/NAK responses
- *  - error handling when reading the device response, don't just die
- *  - VER
- *  - LOOP
- *  - MSAVE
  *
  */
 
@@ -95,8 +61,6 @@
 // the OPC-UA server
 UA_Server *server;
 unsigned short serverPortNumber;
-// log to the console
-UA_Logger logger = Logger_Stdout;
 
 // Overview of the OPC-UA variables hosted by this server.
 // all parameters are double-valued registers accessed with MRG/MWG
@@ -132,14 +96,14 @@ UA_Boolean running = true;
 // print error message and abort the running program
 void Die(char *mess)
 {
-    UA_LOG_FATAL(logger, UA_LOGCATEGORY_SERVER, mess);
+    UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, mess);
     exit(1);
 }
 
 // handle SIGINT und SIGTERM
 static void stopHandler(int signal)
 {
-    UA_LOG_INFO(logger, UA_LOGCATEGORY_SERVER, "received ctrl-c");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "received ctrl-c");
     running = 0;
 }
 
@@ -174,6 +138,36 @@ unsigned int TcpSendReceive() {
 /***********************************/
 
 // switch the output on/off
+UA_StatusCode writeDeviceOutputOn(UA_Server *server,
+                 const UA_NodeId *sessionId, void *sessionContext,
+                 const UA_NodeId *nodeId, void *nodeContext,
+                 const UA_NumericRange *range, const UA_DataValue *data)
+{
+    UA_Variant value;
+    UA_Boolean onoff;
+    if ( data->hasValue )
+        value = data->value;
+    else
+        return UA_STATUSCODE_BADNOTWRITABLE;
+    if ( UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_BOOLEAN]) && (value.data != 0))
+        onoff = *(UA_Boolean*)value.data;
+    else
+        return UA_STATUSCODE_BADNODATA;
+    if ((bool)onoff) {
+        // switch on the output
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MON");
+        strcpy(command,"MON\r\n");
+        TcpSendReceive();
+    } else {
+        // switch off the output
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MOFF");
+        strcpy(command,"MOFF\r\n");
+        TcpSendReceive();
+    };
+    return UA_STATUSCODE_GOOD;
+}
+
+/* old code
 // handle (pointing at DeviceOutputOn) is interpreted as a boolean on/off information
 UA_StatusCode writeDeviceOutputOn(void *handle, const UA_NodeId nodeid,
             const UA_Variant *data, const UA_NumericRange *range) {
@@ -182,18 +176,40 @@ UA_StatusCode writeDeviceOutputOn(void *handle, const UA_NodeId nodeid,
     }
     if (*(bool *)handle) {
         // switch on the output
-        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "MON");
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MON");
         strcpy(command,"MON\r\n");
         TcpSendReceive();
     } else {
         // switch off the output
-        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "MOFF");
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MOFF");
         strcpy(command,"MOFF\r\n");
         TcpSendReceive();
     };
     return UA_STATUSCODE_GOOD;
 }
+*/
 
+UA_StatusCode readDeviceOutputOn(UA_Server *server,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId, void *nodeContext,
+                UA_Boolean sourceTimeStamp, const UA_NumericRange *range,
+                UA_DataValue *dataValue)
+{
+    // send status request to server    
+    strcpy(command,"MST\r\n");
+    unsigned int reclen = TcpSendReceive();
+    // convert the answer into a number
+    // first 5 charecters are #MST:
+    unsigned int status;
+    sscanf(response+5,"%x",&status);
+    UA_Boolean onoff = (status & 1 == 1);
+    UA_Variant_setScalarCopy(&dataValue->value, &onoff,
+                             &UA_TYPES[UA_TYPES_BOOLEAN]);
+    dataValue->hasValue = true;
+    return UA_STATUSCODE_GOOD;
+}
+
+/* old code
 UA_StatusCode readDeviceOutputOn( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
         const UA_NumericRange *range, UA_DataValue *dataValue) {
     // send status request to server    
@@ -209,6 +225,7 @@ UA_StatusCode readDeviceOutputOn( void *handle, const UA_NodeId nodeid, UA_Boole
     UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean *)handle, &UA_TYPES[UA_TYPES_BOOLEAN]);
     return UA_STATUSCODE_GOOD;
 }
+*/
 
 UA_StatusCode readDeviceStatus( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
         const UA_NumericRange *range, UA_DataValue *dataValue) {
@@ -237,7 +254,7 @@ UA_StatusCode writeMReset(void *handle, const UA_NodeId nodeid,
     }
     if (*(bool *)handle) {
         // report to log
-        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "MRESET");
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MRESET");
         // send command
         strcpy(command,"MRESET\r\n");
         TcpSendReceive();
@@ -276,7 +293,7 @@ UA_StatusCode writeCurrent(void *handle, const UA_NodeId nodeid,
     }
     // send request to server
     sprintf(command,"MWI:%9.6f\r\n",*(double *)handle);
-    // UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
+    // UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
     TcpSendReceive();
     return UA_STATUSCODE_GOOD;
 }
@@ -329,7 +346,7 @@ UA_StatusCode writeVoltage(void *handle, const UA_NodeId nodeid,
     }
     // send request to server
     sprintf(command,"MWV:%9.6f\r\n",*(double *)handle);
-    // UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
+    // UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
     TcpSendReceive();
     return UA_STATUSCODE_GOOD;
 }
@@ -359,7 +376,7 @@ UA_StatusCode readRegister( void *handle, const UA_NodeId nodeid, UA_Boolean sou
     unsigned short index = *((unsigned short *)handle);
     double value;
     sprintf(command,"MRG:%d\r\n",index);
-    // UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
+    // UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
     unsigned int reclen = TcpSendReceive();
     // TODO: check reclen
     // convert buffer to numerical value
@@ -381,7 +398,7 @@ UA_StatusCode writeRegister(void *handle, const UA_NodeId nodeid,
         value = *(double *)data->data;
         // register writes are logged
         sprintf(command,"MWG:%d:%lf",index,value);
-        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
         // send request to server
         sprintf(command,"MWG:%d:%lf\r\n",index,value);
         TcpSendReceive();
@@ -503,7 +520,7 @@ int main(int argc, char *argv[])
     //***********************************
     if ((sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
         Die("ERROR : Failed to create socket");
-    UA_LOG_INFO(logger, UA_LOGCATEGORY_NETWORK, "TCP/IP socket opened.");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK, "TCP/IP socket opened.");
     // Construct the server sockaddr_in structure
     memset(&tcpserver, 0, sizeof(tcpserver));			   // clear struct
     tcpserver.sin_family = AF_INET;				           // Internet/IP
@@ -512,18 +529,26 @@ int main(int argc, char *argv[])
     // Establish connection
     if (connect(sock, (struct sockaddr *) &tcpserver, sizeof(tcpserver)) < 0)
         Die("ERROR : Failed to connect to TCP/IP server");
-    UA_LOG_INFO(logger, UA_LOGCATEGORY_NETWORK, "Connected to internal TCP/IP server.");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK, "Connected to internal TCP/IP server.");
 
     //***********************************
     // configure the UA server
     //***********************************
+
+    UA_ServerConfig config;
+    memset(&config, 0, sizeof(UA_ServerConfig));
+    UA_ServerConfig_setMinimal(&config, serverPortNumber, NULL);
+    server = UA_Server_newWithConfig(&config);
+
+    /* old version code
     UA_ServerConfig config = UA_ServerConfig_standard;
     UA_ServerNetworkLayer nl = UA_ServerNetworkLayerTCP(UA_ConnectionConfig_standard, serverPortNumber);
-    config.logger = logger;
+    config.logger = UA_Log_Stdout;
     config.networkLayers = &nl;
     config.networkLayersSize = 1;
     server = UA_Server_new(config);
-
+    */
+    
     UA_ObjectAttributes object_attr;   // attributes for folders
     UA_VariableAttributes attr;        // attributes for variable nodes
 
@@ -552,7 +577,7 @@ int main(int argc, char *argv[])
 
     // create the DeviceName variable
     // read-only value defined in the configuration file
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","device name");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","DeviceName");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
@@ -560,86 +585,87 @@ int main(int argc, char *argv[])
     UA_Server_addVariableNode(server,                                       // UA_Server *server
                               UA_NODEID_NUMERIC(1, 0),                      // UA_NodeId requestedNewNodeId
                               DeviceFolder,                                 // UA_NodeId parentNodeId
-                              UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),  // UA_NodeId referenceTypeId
+                              UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),     // UA_NodeId referenceTypeId
                               UA_QUALIFIEDNAME(1, "DeviceName"),            // UA_QualifiedName browseName
-                              UA_NODEID_NULL,                               // UA_NodeId typeDefinition
+                              UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),  // UA_NodeId typeDefinition
                               attr,                                         // UA_VariableAttributes attr
                               NULL,                                         // UA_InstantiationCallback *instantiationCallback
                               NULL);                                        // UA_NodeId *outNewNodeId
 
+    /*
     // create the DeviceStatus variable
     // read-only
     unsigned int DeviceStatus = 0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","power supply internal status");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","DeviceStatus");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
-    UA_DataSource DeviceStatusDataSource = (UA_DataSource)
-        {
-            .handle = &DeviceStatus,
-            .read = readDeviceStatus,
-            .write = 0
-        };
+    UA_DataSource DeviceStatusDataSource;
+    DeviceStatusDataSource.read = readDeviceStatus;
+    DeviceStatusDataSource.write = NULL;
     UA_Server_addDataSourceVariableNode(
             server,
             UA_NODEID_NUMERIC(1, 0),
             DeviceFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "DeviceStatus"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             DeviceStatusDataSource,
             NULL);
+    */
 
     // writing OutputOn as true switches on the device power output
     // reading returns the value obtained from the status word
     bool DeviceOutputOn = 0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","on/off state of the device output");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","OutputOn");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
-    UA_DataSource OutputOnDataSource = (UA_DataSource)
-        {
-            .handle = &DeviceOutputOn,
-            .read = readDeviceOutputOn,
-            .write = writeDeviceOutputOn
-        };
+    UA_DataSource OutputOnDataSource;
+    OutputOnDataSource.read = readDeviceOutputOn;
+    OutputOnDataSource.write = writeDeviceOutputOn;
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),
-            DeviceFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
-            UA_QUALIFIEDNAME(1, "OutputOn"),
-            UA_NODEID_NULL,
-            attr,
-            OutputOnDataSource,
-            NULL);
+            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            DeviceFolder,                               // parentNodeId
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
+            UA_QUALIFIEDNAME(1, "OutputOn"),            // browseName
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),    // typeDefinition
+            attr,                                       // UA_VariableAttributes
+            OutputOnDataSource,                         // dataSource
+            NULL,                                       // void *nodeContext
+            NULL);                                      // outNewNodeId
 
+    
+    
+/*    
+    
     // create the Reset variable
     // boolean value - writing true performs the reset
     // read will always return false
     // TODO: the value can actually become true - wrong!
     bool DeviceMResetValue = false;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","reset the module status register");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","MReset");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
-    UA_DataSource DeviceMResetDataSource = (UA_DataSource)
-        {
-            .handle = &DeviceMResetValue,
-            .read = readBoolean,
-            .write = writeMReset
-        };
+            // .handle = &DeviceMResetValue,
+    UA_DataSource DeviceMResetDataSource;
+    DeviceMResetDataSource.read = readBoolean;
+    DeviceMResetDataSource.write = writeMReset;
     UA_Server_addDataSourceVariableNode(
             server,
             UA_NODEID_NUMERIC(1, 0),
             DeviceFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "MReset"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             DeviceMResetDataSource,
             NULL);
+
+*/
 
     /**************************
     SetPoint
@@ -663,14 +689,17 @@ int main(int argc, char *argv[])
                             NULL,                                          // UA_InstantiationCallback *instantiationCallback
                             &SetPointFolder);                                // UA_NodeId *outNewNodeId
 
+/*
+
+
     double VoltageReadback = 0.0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","voltage readback [V]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","Voltage");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
     UA_DataSource VoltageDataSource = (UA_DataSource)
         {
-            .handle = &VoltageReadback,
+            // .handle = &VoltageReadback,
             .read = readVoltage,
             .write = 0
         };
@@ -678,21 +707,21 @@ int main(int argc, char *argv[])
             server,
             UA_NODEID_NUMERIC(1, 0),
             SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "Voltage"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             VoltageDataSource,
             NULL);
 
     double CurrentReadback = 0.0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","current readback [A]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","Current");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
     UA_DataSource CurrentDataSource = (UA_DataSource)
         {
-            .handle = &CurrentReadback,
+            // .handle = &CurrentReadback,
             .read = readCurrent,
             .write = 0
         };
@@ -700,9 +729,9 @@ int main(int argc, char *argv[])
             server,
             UA_NODEID_NUMERIC(1, 0),
             SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "Current"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             CurrentDataSource,
             NULL);
@@ -713,13 +742,13 @@ int main(int argc, char *argv[])
     // as read from the device
     // (the special readVoltageSetpoint() callback is used for that)
     double VoltageSetpoint = 0.0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","voltage setpoint [V]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","VoltageSetpoint");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
     UA_DataSource VoltageSetpointDataSource = (UA_DataSource)
         {
-            .handle = &VoltageSetpoint,
+            // .handle = &VoltageSetpoint,
             .read = readVoltageSetpoint,
             .write = writeVoltage
         };
@@ -727,9 +756,9 @@ int main(int argc, char *argv[])
             server,
             UA_NODEID_NUMERIC(1, 0),
             SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "VoltageSetpoint"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             VoltageSetpointDataSource,
             NULL);
@@ -739,13 +768,13 @@ int main(int argc, char *argv[])
     // reading the setpoint returns the active setpoint value
     // as read from the device
     double CurrentSetpoint = 0.0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","current setpoint [A]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","CurrentSetpoint");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
     UA_DataSource CurrentSetpointDataSource = (UA_DataSource)
         {
-            .handle = &CurrentSetpoint,
+            // .handle = &CurrentSetpoint,
             .read = readCurrentSetpoint,
             .write = writeCurrent
         };
@@ -753,12 +782,14 @@ int main(int argc, char *argv[])
             server,
             UA_NODEID_NUMERIC(1, 0),
             SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "CurrentSetpoint"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             CurrentSetpointDataSource,
             NULL);
+
+*/
 
     /**************************
     Parameters
@@ -780,6 +811,8 @@ int main(int argc, char *argv[])
                             NULL,                                          // UA_InstantiationCallback *instantiationCallback
                             &RegistersFolder);                             // UA_NodeId *outNewNodeId
 
+/*
+
     // here we store the register numbers
     unsigned short RegNr[maxreg];
     // these are structs for acessing the data
@@ -790,7 +823,7 @@ int main(int argc, char *argv[])
             if (! strcmp(currNode->name, "register"))
             {
                 // set the variable attributes as they are read from the config file
-                UA_VariableAttributes_init(&attr);
+                attr = UA_VariableAttributes_default;
                 // first the register number
                 unsigned short regNumber;
                 xmlChar *numberProp = xmlGetProp(currNode,"number");
@@ -822,7 +855,7 @@ int main(int argc, char *argv[])
                 // get at pointer to the datasource storage
                 UA_DataSource *ds = RegDS+loopindex;
                 // the handle points to the register number
-                ds->handle = RegNr+loopindex;
+                // ds->handle = RegNr+loopindex;
                 // we have special routines for reading/writing registers
                 ds->read = readRegister;
                 ds->write = writeRegister;
@@ -830,9 +863,9 @@ int main(int argc, char *argv[])
                         server,
                         UA_NODEID_NUMERIC(1, 0),
                         RegistersFolder,
-                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                        UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
                         UA_QUALIFIEDNAME(1, nodeName),
-                        UA_NODEID_NULL,
+                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
                         attr,
                         *ds,
                         NULL);
@@ -840,6 +873,8 @@ int main(int argc, char *argv[])
                 if (loopindex>=maxreg)
                     Die("OpcUaServer : too many registers\n");
             };
+
+*/
 
     // done with the XML document
     xmlFreeDoc(doc);
@@ -849,9 +884,8 @@ int main(int argc, char *argv[])
     UA_StatusCode retval = UA_Server_run(server, &running);
 
     // the server has stopped running
-    UA_LOG_INFO(logger, UA_LOGCATEGORY_SERVER, "server stopped running.");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "server stopped running.");
     UA_Server_delete(server);
-    nl.deleteMembers(&nl);
 
     close(sock);
 
