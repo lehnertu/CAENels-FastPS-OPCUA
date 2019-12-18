@@ -59,21 +59,23 @@ for the ARM target CPU of the power supplies.
 The OPC UA stack needs to be downloaded and built. This can be done on
 the development system - there is no binary code produced at this stage.
 The complete stack is obtained in two (amalgamated) files.
-- open62541.h
-- open62541.c
+   - git submodule update --init --recursive
+   - cd open62541
+   - mmkdir build
+   - cd build
+   - cmake -DUA_ENABLE_AMALGAMATION="ON" ..
+   - make
+Now the needed header and source files are found at open62541/build/
 
 In addition the libxml2 library is required. It needs to be built
 and installed into the cross-target tool chain.
 
 A makefile is not yet provided, just a few lines are required to build the server.
 - source ../tools/environment
-- $CC -std=c99 -c open62541.c
+- $CC -std=c99 -c open62541/build/open62541.c
+- cp open62541/build/open62541.h .
 - $CC -std=c99 -c -I $SDKTARGETSYSROOT/usr/include/libxml2/ OpcUaServer.c
-- $CXX -o opcuaserver OpcUaServer.o open62541.o -lpthread -lxml2
-
-if dynamic linking is used a compatible version of libxml2.so has to be installed onto the target
-alternative static linking of xml library
-$CXX -o opcuaserver OpcUaServer.o open62541.o $SDKTARGETSYSROOT/usr/lib/libxml2.a -lpthread
+- $CXX -o opcuaserver OpcUaServer.o open62541.o $SDKTARGETSYSROOT/usr/lib/libxml2.a -lpthread
 
 Installation
 ============
