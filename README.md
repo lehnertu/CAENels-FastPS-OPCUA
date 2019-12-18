@@ -79,19 +79,18 @@ A makefile is not yet provided, just a few lines are required to build the serve
 
 Installation
 ============
-For istallation a few files need to be copied onto the device:
-- opcuaserver binary installed in /tmp/ for testing
+For istallation two files need to be copied onto the device:
+- opcuaserver binary installed in /opt/
 - opcua.xml configuration file in /etc/
-- libxml2.so.2 in /usr/lib/ (if not static link)
 
-The server can then be run by executing /tmp/opcuaserver.
+The server can then be run by executing /opt/opcuaserver.
 
 For an automatic start at bootup the startup script has to be installed as follows:
 $ scp opcua-startup root@10.66.67.10:/etc/init.d/
 A link has to be set in the startup script directory:
 $ ssh root@10.66.67.10
 $ cd /etc/rc5.d/
-$ ln -s ../init.d/opcua-startup S99z-opcua-startup
+$ ln -s ../init.d/opcua-startup S91opcua-startup
 
 Testing
 =======

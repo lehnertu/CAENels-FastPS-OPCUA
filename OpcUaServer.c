@@ -167,28 +167,6 @@ UA_StatusCode writeDeviceOutputOn(UA_Server *server,
     return UA_STATUSCODE_GOOD;
 }
 
-/* old code
-// handle (pointing at DeviceOutputOn) is interpreted as a boolean on/off information
-UA_StatusCode writeDeviceOutputOn(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_BOOLEAN] && data->data) {
-        *(UA_Boolean*)handle = *(UA_Boolean*)data->data;
-    }
-    if (*(bool *)handle) {
-        // switch on the output
-        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MON");
-        strcpy(command,"MON\r\n");
-        TcpSendReceive();
-    } else {
-        // switch off the output
-        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MOFF");
-        strcpy(command,"MOFF\r\n");
-        TcpSendReceive();
-    };
-    return UA_STATUSCODE_GOOD;
-}
-*/
-
 UA_StatusCode readDeviceOutputOn(UA_Server *server,
                 const UA_NodeId *sessionId, void *sessionContext,
                 const UA_NodeId *nodeId, void *nodeContext,
@@ -203,32 +181,20 @@ UA_StatusCode readDeviceOutputOn(UA_Server *server,
     unsigned int status;
     sscanf(response+5,"%x",&status);
     UA_Boolean onoff = (status & 1 == 1);
+    // set the variable value
     UA_Variant_setScalarCopy(&dataValue->value, &onoff,
                              &UA_TYPES[UA_TYPES_BOOLEAN]);
     dataValue->hasValue = true;
     return UA_STATUSCODE_GOOD;
 }
 
-/* old code
-UA_StatusCode readDeviceOutputOn( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
-    // send status request to server    
-    strcpy(command,"MST\r\n");
-    unsigned int reclen = TcpSendReceive();
-    // convert the answer into a number
-    // first 5 charecters are #MST:
-    unsigned int status;
-    sscanf(response+5,"%x",&status);
-    *(bool *)handle = (status & 1 == 1);
-    // set the variable value
-    dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean *)handle, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    return UA_STATUSCODE_GOOD;
-}
-*/
-
-UA_StatusCode readDeviceStatus( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
+// read the devie status
+UA_StatusCode readDeviceStatus(UA_Server *server,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId, void *nodeContext,
+                UA_Boolean sourceTimeStamp, const UA_NumericRange *range,
+                UA_DataValue *dataValue)
+{
     // send request to server    
     strcpy(command,"MST\r\n");
     unsigned int reclen = TcpSendReceive();
@@ -236,140 +202,208 @@ UA_StatusCode readDeviceStatus( void *handle, const UA_NodeId nodeid, UA_Boolean
     // first 5 charecters are #MST:
     unsigned int status;
     int result = sscanf(response+5,"%x",&status);
-    if (result==0)
-        *(unsigned int *)handle = -1;
-    else
-        *(unsigned int *)handle = status;
     // set the variable value
+    UA_Variant_setScalarCopy(&dataValue->value, &status,
+                             &UA_TYPES[UA_TYPES_UINT32]);
     dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (unsigned int *)handle, &UA_TYPES[UA_TYPES_UINT32]);
+    return UA_STATUSCODE_GOOD;
+}
+
+// reading from the RESET variable always returns false
+UA_StatusCode readMReset(UA_Server *server,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId, void *nodeContext,
+                UA_Boolean sourceTimeStamp, const UA_NumericRange *range,
+                UA_DataValue *dataValue)
+{
+    UA_Boolean ret = false;
+    // set the variable value
+    UA_Variant_setScalarCopy(&dataValue->value, &ret,
+                             &UA_TYPES[UA_TYPES_BOOLEAN]);
+    dataValue->hasValue = true;
     return UA_STATUSCODE_GOOD;
 }
 
 // write an MRESET command when set to true
-UA_StatusCode writeMReset(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_BOOLEAN] && data->data) {
-        *(UA_Boolean*)handle = *(UA_Boolean*)data->data;
-    }
-    if (*(bool *)handle) {
+UA_StatusCode writeMReset(UA_Server *server,
+                 const UA_NodeId *sessionId, void *sessionContext,
+                 const UA_NodeId *nodeId, void *nodeContext,
+                 const UA_NumericRange *range, const UA_DataValue *data)
+{
+    UA_Variant value;
+    UA_Boolean reset;
+    if ( data->hasValue )
+        value = data->value;
+    else
+        return UA_STATUSCODE_BADNOTWRITABLE;
+    if ( UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_BOOLEAN]) && (value.data != 0))
+        reset = *(UA_Boolean*)value.data;
+    else
+        return UA_STATUSCODE_BADNODATA;
+    if ((bool)reset)
+    {
         // report to log
         UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MRESET");
         // send command
         strcpy(command,"MRESET\r\n");
         TcpSendReceive();
-    };
+    }
     return UA_STATUSCODE_GOOD;
 }
 
 // callback routine for reading the current value
-UA_StatusCode readCurrent( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
-    // handle is supposed to point to CurrentReadback
+UA_StatusCode readCurrent(UA_Server *server,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId, void *nodeContext,
+                UA_Boolean sourceTimeStamp, const UA_NumericRange *range,
+                UA_DataValue *dataValue)
+{
+    double current;
     // send request to server    
     strcpy(command,"MRI\r\n");
     unsigned int reclen = TcpSendReceive();
     // convert buffer to numerical value
     // first 5 charecters are #MRI:
     if(strncmp(response,"#MRI:",5)==0)
-        sscanf(response+5,"%lf",(double *)handle);
+        sscanf(response+5,"%lf",&current);
     else
-    {
-        // printf("wrong MRI response : %s",response);
-        *(double *)handle = 999.999;
-    }
-    // set the variable value
+        current = 999.999;
+    UA_Variant_setScalarCopy(&dataValue->value, &current,
+                             &UA_TYPES[UA_TYPES_DOUBLE]);
     dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
-    return UA_STATUSCODE_GOOD;
-}
-
-// callback routine for writing the current value
-UA_StatusCode writeCurrent(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    // handle is supposed to point to CurrentReadback
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_DOUBLE] && data->data) {
-        *(UA_Double*)handle = *(UA_Double*)data->data;
-    }
-    // send request to server
-    sprintf(command,"MWI:%9.6f\r\n",*(double *)handle);
-    // UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
-    TcpSendReceive();
     return UA_STATUSCODE_GOOD;
 }
 
 // callback routine for reading the current setpoint
 // this only works if the output is on, otherwise #NAK:13 is answered
-UA_StatusCode readCurrentSetpoint( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
+// in that case 0.0 is returned
+UA_StatusCode readCurrentSetpoint(UA_Server *server,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId, void *nodeContext,
+                UA_Boolean sourceTimeStamp, const UA_NumericRange *range,
+                UA_DataValue *dataValue)
+{
+    double current;
     // send request to server    
     strcpy(command,"MWI:?\r\n");
     unsigned int reclen = TcpSendReceive();
     // convert buffer to numerical value
     // first 5 charecters are #MWI:
     if(strncmp(response,"#MWI:",5)==0)
-        sscanf(response+5,"%lf",(double *)handle);
+        sscanf(response+5,"%lf",&current);
     else
-        *(double *)handle = 999.999;
-    // set the variable value
+        current = 0.0;
+    UA_Variant_setScalarCopy(&dataValue->value, &current,
+                             &UA_TYPES[UA_TYPES_DOUBLE]);
     dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
+    return UA_STATUSCODE_GOOD;
+}
+
+// callback routine for writing the current setpoint
+UA_StatusCode writeCurrentSetpoint(UA_Server *server,
+                 const UA_NodeId *sessionId, void *sessionContext,
+                 const UA_NodeId *nodeId, void *nodeContext,
+                 const UA_NumericRange *range, const UA_DataValue *data)
+{
+    UA_Variant value;
+    UA_Double current;
+    if ( data->hasValue )
+        value = data->value;
+    else
+        return UA_STATUSCODE_BADNOTWRITABLE;
+    if ( UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_DOUBLE]) && (value.data != 0))
+        current = *(double *)value.data;
+    else
+        return UA_STATUSCODE_BADNODATA;
+    // send request to server
+    sprintf(command,"MWI:%9.6f\r\n",current);
+    TcpSendReceive();
+    if(strncmp(response,"#AK",3)!=0)
+    {
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, response);
+        return UA_STATUSCODE_BADWRITENOTSUPPORTED;
+    }
     return UA_STATUSCODE_GOOD;
 }
 
 // callback routine for reading the voltage value
-UA_StatusCode readVoltage( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
-    // handle is supposed to point to VoltageReadback
+UA_StatusCode readVoltage(UA_Server *server,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId, void *nodeContext,
+                UA_Boolean sourceTimeStamp, const UA_NumericRange *range,
+                UA_DataValue *dataValue)
+{
+    double voltage;
     // send request to server    
     strcpy(command,"MRV\r\n");
     unsigned int reclen = TcpSendReceive();
     // convert buffer to numerical value
-    // first 5 charecters are #MRV:
+    // first 5 charecters are #MRI:
     if(strncmp(response,"#MRV:",5)==0)
-        sscanf(response+5,"%lf",(double *)handle);
+        sscanf(response+5,"%lf",&voltage);
     else
-        *(double *)handle = 999.999;
-    int result = sscanf(response+5,"%lf",(double *)handle);
-    // set the variable value
+        voltage = 999.999;
+    UA_Variant_setScalarCopy(&dataValue->value, &voltage,
+                             &UA_TYPES[UA_TYPES_DOUBLE]);
     dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
-    return UA_STATUSCODE_GOOD;
-}
-
-// callback routine for writing the voltage value
-UA_StatusCode writeVoltage(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    // handle is supposed to point to VoltageReadback
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_DOUBLE] && data->data) {
-        *(UA_Double*)handle = *(UA_Double*)data->data;
-    }
-    // send request to server
-    sprintf(command,"MWV:%9.6f\r\n",*(double *)handle);
-    // UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
-    TcpSendReceive();
     return UA_STATUSCODE_GOOD;
 }
 
 // callback routine for reading the voltage setpoint
 // this only works if the output is on, otherwise #NAK:13 is answered
-UA_StatusCode readVoltageSetpoint( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
+// in that case 0.0 is returned
+UA_StatusCode readVoltageSetpoint(UA_Server *server,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId, void *nodeContext,
+                UA_Boolean sourceTimeStamp, const UA_NumericRange *range,
+                UA_DataValue *dataValue)
+{
+    double voltage;
     // send request to server    
     strcpy(command,"MWV:?\r\n");
     unsigned int reclen = TcpSendReceive();
     // convert buffer to numerical value
     // first 5 charecters are #MWV:
     if(strncmp(response,"#MWV:",5)==0)
-        sscanf(response+5,"%lf",(double *)handle);
+        sscanf(response+5,"%lf",&voltage);
     else
-        *(double *)handle = 999.999;
-    // set the variable value
+        voltage = 0.0;
+    UA_Variant_setScalarCopy(&dataValue->value, &voltage,
+                             &UA_TYPES[UA_TYPES_DOUBLE]);
     dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
     return UA_STATUSCODE_GOOD;
 }
 
+// callback routine for writing the voltage setpoint
+UA_StatusCode writeVoltageSetpoint(UA_Server *server,
+                 const UA_NodeId *sessionId, void *sessionContext,
+                 const UA_NodeId *nodeId, void *nodeContext,
+                 const UA_NumericRange *range, const UA_DataValue *data)
+{
+    UA_Variant value;
+    UA_Double voltage;
+    if ( data->hasValue )
+        value = data->value;
+    else
+        return UA_STATUSCODE_BADNOTWRITABLE;
+    if ( UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_DOUBLE]) && (value.data != 0))
+        voltage = *(double *)value.data;
+    else
+        return UA_STATUSCODE_BADNODATA;
+    // send request to server
+    sprintf(command,"MWV:%9.6f\r\n",voltage);
+    TcpSendReceive();
+    if(strncmp(response,"#AK",3)!=0)
+    {
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, response);
+        return UA_STATUSCODE_BADWRITENOTSUPPORTED;
+    }
+    return UA_STATUSCODE_GOOD;
+}
+
+/* old code
 UA_StatusCode readRegister( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
         const UA_NumericRange *range, UA_DataValue *dataValue) {
     // handle is supposed to point to the (unsigned short) register number
@@ -406,6 +440,7 @@ UA_StatusCode writeRegister(void *handle, const UA_NodeId nodeid,
     }
     return UA_STATUSCODE_GOOD;
 }
+*/
 
 /***********************************/
 /* generic read/write methods      */
@@ -540,15 +575,6 @@ int main(int argc, char *argv[])
     UA_ServerConfig_setMinimal(&config, serverPortNumber, NULL);
     server = UA_Server_newWithConfig(&config);
 
-    /* old version code
-    UA_ServerConfig config = UA_ServerConfig_standard;
-    UA_ServerNetworkLayer nl = UA_ServerNetworkLayerTCP(UA_ConnectionConfig_standard, serverPortNumber);
-    config.logger = UA_Log_Stdout;
-    config.networkLayers = &nl;
-    config.networkLayersSize = 1;
-    server = UA_Server_new(config);
-    */
-    
     UA_ObjectAttributes object_attr;   // attributes for folders
     UA_VariableAttributes attr;        // attributes for variable nodes
 
@@ -592,10 +618,8 @@ int main(int argc, char *argv[])
                               NULL,                                         // UA_InstantiationCallback *instantiationCallback
                               NULL);                                        // UA_NodeId *outNewNodeId
 
-    /*
     // create the DeviceStatus variable
     // read-only
-    unsigned int DeviceStatus = 0;
     attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","power supply internal status");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","DeviceStatus");
@@ -605,19 +629,18 @@ int main(int argc, char *argv[])
     DeviceStatusDataSource.write = NULL;
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),
-            DeviceFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
-            UA_QUALIFIEDNAME(1, "DeviceStatus"),
-            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
-            attr,
-            DeviceStatusDataSource,
-            NULL);
-    */
+            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            DeviceFolder,                               // parentNodeId
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
+            UA_QUALIFIEDNAME(1, "DeviceStatus"),        // browseName
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),    // typeDefinition
+            attr,                                       // UA_VariableAttributes
+            DeviceStatusDataSource,                     // dataSource
+            NULL,                                       // void *nodeContext
+            NULL);                                      // outNewNodeId
 
     // writing OutputOn as true switches on the device power output
     // reading returns the value obtained from the status word
-    bool DeviceOutputOn = 0;
     attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","on/off state of the device output");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","OutputOn");
@@ -636,36 +659,29 @@ int main(int argc, char *argv[])
             OutputOnDataSource,                         // dataSource
             NULL,                                       // void *nodeContext
             NULL);                                      // outNewNodeId
-
-    
-    
-/*    
     
     // create the Reset variable
     // boolean value - writing true performs the reset
     // read will always return false
-    // TODO: the value can actually become true - wrong!
-    bool DeviceMResetValue = false;
     attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","reset the module status register");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","MReset");
-    attr.accessLevel = UA_ACCESSLEVELMASK_READ;
+    attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
             // .handle = &DeviceMResetValue,
     UA_DataSource DeviceMResetDataSource;
-    DeviceMResetDataSource.read = readBoolean;
+    DeviceMResetDataSource.read = readMReset;
     DeviceMResetDataSource.write = writeMReset;
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),
-            DeviceFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
-            UA_QUALIFIEDNAME(1, "MReset"),
-            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
-            attr,
-            DeviceMResetDataSource,
-            NULL);
-
-*/
+            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            DeviceFolder,                               // parentNodeId
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
+            UA_QUALIFIEDNAME(1, "MReset"),              // browseName
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),    // typeDefinition
+            attr,                                       // UA_VariableAttributes
+            DeviceMResetDataSource,                     // dataSource
+            NULL,                                       // void *nodeContext
+            NULL);                                      // outNewNodeId
 
     /**************************
     SetPoint
@@ -687,109 +703,100 @@ int main(int argc, char *argv[])
                             UA_NODEID_NUMERIC(0, UA_NS0ID_FOLDERTYPE),     // UA_NodeId typeDefinition
                             object_attr,                                   // UA_ObjectAttributes attr
                             NULL,                                          // UA_InstantiationCallback *instantiationCallback
-                            &SetPointFolder);                                // UA_NodeId *outNewNodeId
+                            &SetPointFolder);                              // UA_NodeId *outNewNodeId
 
-/*
-
-
-    double VoltageReadback = 0.0;
     attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","voltage readback [V]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","Voltage");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
     UA_DataSource VoltageDataSource = (UA_DataSource)
         {
-            // .handle = &VoltageReadback,
             .read = readVoltage,
             .write = 0
         };
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),
-            SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
-            UA_QUALIFIEDNAME(1, "Voltage"),
-            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
-            attr,
-            VoltageDataSource,
-            NULL);
+            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            SetPointFolder,                             // parentNodeId
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
+            UA_QUALIFIEDNAME(1, "Voltage"),             // browseName
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),    // typeDefinition
+            attr,                                       // UA_VariableAttributes
+            VoltageDataSource,                          // dataSource
+            NULL,                                       // void *nodeContext
+            NULL);                                      // outNewNodeId
 
-    double CurrentReadback = 0.0;
     attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","current readback [A]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","Current");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
     UA_DataSource CurrentDataSource = (UA_DataSource)
         {
-            // .handle = &CurrentReadback,
             .read = readCurrent,
             .write = 0
         };
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),
-            SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
-            UA_QUALIFIEDNAME(1, "Current"),
-            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
-            attr,
-            CurrentDataSource,
-            NULL);
+            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            SetPointFolder,                             // parentNodeId
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
+            UA_QUALIFIEDNAME(1, "Current"),             // browseName
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),    // typeDefinition
+            attr,                                       // UA_VariableAttributes
+            CurrentDataSource,                          // dataSource
+            NULL,                                       // void *nodeContext
+            NULL);                                      // outNewNodeId
 
     // when the setpoint is written, the voltage setting in the device is updated
-    // (the special writeVoltage() callback is used for that)
+    // (the special writeVoltageSetpoint() callback is used for that)
     // reading the setpoint returns the active setpoint value
     // as read from the device
     // (the special readVoltageSetpoint() callback is used for that)
-    double VoltageSetpoint = 0.0;
     attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","voltage setpoint [V]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","VoltageSetpoint");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
     UA_DataSource VoltageSetpointDataSource = (UA_DataSource)
         {
-            // .handle = &VoltageSetpoint,
             .read = readVoltageSetpoint,
-            .write = writeVoltage
+            .write = writeVoltageSetpoint
         };
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),
-            SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
-            UA_QUALIFIEDNAME(1, "VoltageSetpoint"),
-            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
-            attr,
-            VoltageSetpointDataSource,
-            NULL);
+            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            SetPointFolder,                             // parentNodeId
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
+            UA_QUALIFIEDNAME(1, "VoltageSetpoint"),     // browseName
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),    // typeDefinition
+            attr,                                       // UA_VariableAttributes
+            VoltageSetpointDataSource,                  // dataSource
+            NULL,                                       // void *nodeContext
+            NULL);                                      // outNewNodeId
 
     // when the setpoint is written, the current setting in the device is updated
-    // (the special writeCurrent() callback is used for that)
+    // (the special writeCurrentSetpoint() callback is used for that)
     // reading the setpoint returns the active setpoint value
     // as read from the device
-    double CurrentSetpoint = 0.0;
     attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","current setpoint [A]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","CurrentSetpoint");
     attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
     UA_DataSource CurrentSetpointDataSource = (UA_DataSource)
         {
-            // .handle = &CurrentSetpoint,
             .read = readCurrentSetpoint,
-            .write = writeCurrent
+            .write = writeCurrentSetpoint
         };
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),
-            SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
-            UA_QUALIFIEDNAME(1, "CurrentSetpoint"),
-            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
-            attr,
-            CurrentSetpointDataSource,
-            NULL);
-
-*/
+            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            SetPointFolder,                             // parentNodeId
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
+            UA_QUALIFIEDNAME(1, "CurrentSetpoint"),     // browseName
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),    // typeDefinition
+            attr,                                       // UA_VariableAttributes
+            CurrentSetpointDataSource,                  // dataSource
+            NULL,                                       // void *nodeContext
+            NULL);                                      // outNewNodeId
 
     /**************************
     Parameters
