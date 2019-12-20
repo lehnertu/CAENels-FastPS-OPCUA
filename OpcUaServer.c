@@ -464,45 +464,6 @@ UA_StatusCode writeRegister(UA_Server *server,
     return UA_STATUSCODE_GOOD;
 }
 
-/* old code
-UA_StatusCode readRegister( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
-    // handle is supposed to point to the (unsigned short) register number
-    unsigned short index = *((unsigned short *)handle);
-    double value;
-    sprintf(command,"MRG:%d\r\n",index);
-    // UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
-    unsigned int reclen = TcpSendReceive();
-    // TODO: check reclen
-    // convert buffer to numerical value
-    // first 8 charecters are #MRG:??:
-    int result = sscanf(response+8,"%lf",&value);
-    // TODO: check result
-    // set the variable value
-    dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)&value, &UA_TYPES[UA_TYPES_DOUBLE]);
-    return UA_STATUSCODE_GOOD;
-}
-
-UA_StatusCode writeRegister(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    // handle is supposed to point to the (unsigned short) register number
-    unsigned short index = *((unsigned short *)handle);
-    double value;
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_DOUBLE] && data->data) {
-        value = *(double *)data->data;
-        // register writes are logged
-        sprintf(command,"MWG:%d:%lf",index,value);
-        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
-        // send request to server
-        sprintf(command,"MWG:%d:%lf\r\n",index,value);
-        TcpSendReceive();
-        printf("MWG response : %s",response);
-    }
-    return UA_STATUSCODE_GOOD;
-}
-*/
-
 /***********************************/
 /* generic read/write methods      */
 /* for server-internal variables   */
