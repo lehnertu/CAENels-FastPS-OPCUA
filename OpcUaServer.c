@@ -403,6 +403,67 @@ UA_StatusCode writeVoltageSetpoint(UA_Server *server,
     return UA_STATUSCODE_GOOD;
 }
 
+// callback routine for reading a configuration register
+UA_StatusCode readRegister(UA_Server *server,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId, void *nodeContext,
+                UA_Boolean sourceTimeStamp, const UA_NumericRange *range,
+                UA_DataValue *dataValue)
+{
+    double reg;
+    // the nodeContext is used as the register number
+    unsigned short index = *(unsigned short *)nodeContext;
+    sprintf(command,"MRG:%d\r\n",index);
+    unsigned int reclen = TcpSendReceive();
+    if(strncmp(response,"#MRG:",5)!=0)
+    {
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, response);
+        return UA_STATUSCODE_BADNOTREADABLE;
+        
+    }
+    // convert buffer to numerical value
+    // first 8 charecters are #MRG:??:
+    int result = sscanf(response+8,"%lf",&reg);
+    // set the variable value
+    UA_Variant_setScalarCopy(&dataValue->value, &reg,
+                             &UA_TYPES[UA_TYPES_DOUBLE]);
+    dataValue->hasValue = true;
+    return UA_STATUSCODE_GOOD;
+}
+
+// callback routine for writing a configuration register
+UA_StatusCode writeRegister(UA_Server *server,
+                 const UA_NodeId *sessionId, void *sessionContext,
+                 const UA_NodeId *nodeId, void *nodeContext,
+                 const UA_NumericRange *range, const UA_DataValue *data)
+{
+    UA_Variant value;
+    UA_Double reg;
+    // the nodeContext is used as the register number
+    unsigned short index = *(unsigned short *)nodeContext;
+    if ( data->hasValue )
+        value = data->value;
+    else
+        return UA_STATUSCODE_BADNOTWRITABLE;
+    if ( UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_DOUBLE]) && (value.data != 0))
+        reg = *(double *)value.data;
+    else
+        return UA_STATUSCODE_BADNODATA;
+    sprintf(command,"MWG:%d:%lf",index,reg);
+    // register writes are logged
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
+    // send request to server
+    sprintf(command,"MWG:%d:%lf\r\n",index,value);
+    TcpSendReceive();
+    if(strncmp(response,"#AK",3)!=0)
+    {
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, response);
+        return UA_STATUSCODE_BADWRITENOTSUPPORTED;
+    }
+    return UA_STATUSCODE_GOOD;
+}
+
 /* old code
 UA_StatusCode readRegister( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
         const UA_NumericRange *range, UA_DataValue *dataValue) {
@@ -818,19 +879,15 @@ int main(int argc, char *argv[])
                             NULL,                                          // UA_InstantiationCallback *instantiationCallback
                             &RegistersFolder);                             // UA_NodeId *outNewNodeId
 
-/*
-
-    // here we store the register numbers
+    // here we store the register numbers and data sources
     unsigned short RegNr[maxreg];
-    // these are structs for acessing the data
     UA_DataSource RegDS[maxreg];
+    // read register declarations from the config file
     int loopindex=0;
     for (xmlNode *currNode = parametersNode->children; currNode; currNode = currNode->next)
         if (currNode->type == XML_ELEMENT_NODE)
             if (! strcmp(currNode->name, "register"))
             {
-                // set the variable attributes as they are read from the config file
-                attr = UA_VariableAttributes_default;
                 // first the register number
                 unsigned short regNumber;
                 xmlChar *numberProp = xmlGetProp(currNode,"number");
@@ -841,6 +898,8 @@ int main(int argc, char *argv[])
                 if (sscanf(buf,"%d",&regNumber)<1)
                     Die("OpcUaServer : Failed to interpret <register> number property\n");
                 RegNr[loopindex] = regNumber;
+                // a pointer to the register number will be used as node context
+                void *nodeContext = (void *)(RegNr+loopindex);
                 // second the node name
                 char nodeName[80];
                 xmlChar *nameProp = xmlGetProp(currNode,"name");
@@ -849,39 +908,42 @@ int main(int argc, char *argv[])
                     Die("OpcUaServer : Failed to read XML <register> name property\n");
                 buf[buflen] = '\0';         // string termination
                 strcpy(nodeName,buf);
-                printf("OpcUaServer : Register=%d %s\n", regNumber, nodeName);
-                attr.displayName = UA_LOCALIZEDTEXT("en_US",nodeName);
-                // thirdd the node description
+                // third the node description
+                char nodeDescr[80];
                 xmlChar *descProp = xmlGetProp(currNode,"description");
                 buflen = xmlStrPrintf(buf, 80, "%s", descProp);
                 if (buflen == 0)
                     Die("OpcUaServer : Failed to read XML <register> description property\n");
                 buf[buflen] = '\0';         // string termination
-                attr.description = UA_LOCALIZEDTEXT("en_US",buf);
+                strcpy(nodeDescr,buf);
+                // log register definitions
+                printf("OpcUaServer : Register=%d %s %d %s\n",
+                    regNumber, nodeName, *(unsigned short *)nodeContext, nodeDescr);
+                // set the variable attributes
+                attr = UA_VariableAttributes_default;
+                attr.description = UA_LOCALIZEDTEXT("en_US",nodeDescr);
+                attr.displayName = UA_LOCALIZEDTEXT("en_US",nodeName);
                 attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
-                // get at pointer to the datasource storage
-                UA_DataSource *ds = RegDS+loopindex;
-                // the handle points to the register number
-                // ds->handle = RegNr+loopindex;
-                // we have special routines for reading/writing registers
-                ds->read = readRegister;
-                ds->write = writeRegister;
+                RegDS[loopindex] = (UA_DataSource)
+                    {
+                        .read = readRegister,
+                        .write = writeRegister
+                    };
                 UA_Server_addDataSourceVariableNode(
                         server,
-                        UA_NODEID_NUMERIC(1, 0),
-                        RegistersFolder,
-                        UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
-                        UA_QUALIFIEDNAME(1, nodeName),
-                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
-                        attr,
-                        *ds,
-                        NULL);
+                        UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+                        RegistersFolder,                            // parentNodeId
+                        UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
+                        UA_QUALIFIEDNAME(1, nodeName),              // browseName
+                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),    // typeDefinition
+                        attr,                                       // UA_VariableAttributes
+                        RegDS[loopindex],                           // dataSource
+                        nodeContext,                                // void *nodeContext
+                        NULL);                                      // outNewNodeId
                 loopindex++;
                 if (loopindex>=maxreg)
                     Die("OpcUaServer : too many registers\n");
             };
-
-*/
 
     // done with the XML document
     xmlFreeDoc(doc);
