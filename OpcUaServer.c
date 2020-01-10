@@ -614,7 +614,7 @@ int main(int argc, char *argv[])
     object_attr.displayName = UA_LOCALIZEDTEXT("en_US","Device");
     UA_NodeId DeviceFolder;
     UA_Server_addObjectNode(server,                                        // UA_Server *server
-                            UA_NODEID_NUMERIC(1, 0),                       // UA_NodeId requestedNewNodeId
+                            UA_NODEID_STRING(1, "Device"),                 // UA_NodeId requestedNewNodeId
                             UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),  // UA_NodeId parentNodeId
                             UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),      // UA_NodeId referenceTypeId
                             UA_QUALIFIEDNAME(1, "Device"),                 // UA_QualifiedName browseName
@@ -631,7 +631,7 @@ int main(int argc, char *argv[])
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
     UA_Variant_setScalarCopy(&attr.value, &DeviceName, &UA_TYPES[UA_TYPES_STRING]);
     UA_Server_addVariableNode(server,                                       // UA_Server *server
-                              UA_NODEID_NUMERIC(1, 0),                      // UA_NodeId requestedNewNodeId
+                              UA_NODEID_STRING(1, "DeviceName"),            // UA_NodeId requestedNewNodeId
                               DeviceFolder,                                 // UA_NodeId parentNodeId
                               UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),     // UA_NodeId referenceTypeId
                               UA_QUALIFIEDNAME(1, "DeviceName"),            // UA_QualifiedName browseName
@@ -651,7 +651,7 @@ int main(int argc, char *argv[])
     DeviceStatusDataSource.write = NULL;
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            UA_NODEID_STRING(1, "DeviceStatus"),        // requestedNewNodeId
             DeviceFolder,                               // parentNodeId
             UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
             UA_QUALIFIEDNAME(1, "DeviceStatus"),        // browseName
@@ -672,7 +672,7 @@ int main(int argc, char *argv[])
     OutputOnDataSource.write = writeDeviceOutputOn;
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            UA_NODEID_STRING(1, "OutputOn"),            // requestedNewNodeId
             DeviceFolder,                               // parentNodeId
             UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
             UA_QUALIFIEDNAME(1, "OutputOn"),            // browseName
@@ -695,7 +695,7 @@ int main(int argc, char *argv[])
     DeviceMResetDataSource.write = writeMReset;
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            UA_NODEID_STRING(1, "MReset"),              // requestedNewNodeId
             DeviceFolder,                               // parentNodeId
             UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
             UA_QUALIFIEDNAME(1, "MReset"),              // browseName
@@ -718,7 +718,7 @@ int main(int argc, char *argv[])
     object_attr.displayName = UA_LOCALIZEDTEXT("en_US","SetPoint");
     UA_NodeId SetPointFolder;
     UA_Server_addObjectNode(server,                                        // UA_Server *server
-                            UA_NODEID_NUMERIC(1, 0),                       // UA_NodeId requestedNewNodeId
+                            UA_NODEID_STRING(1, "SetPoint"),               // UA_NodeId requestedNewNodeId
                             UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),  // UA_NodeId parentNodeId
                             UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),      // UA_NodeId referenceTypeId
                             UA_QUALIFIEDNAME(1, "SetPoint"),               // UA_QualifiedName browseName
@@ -738,7 +738,7 @@ int main(int argc, char *argv[])
         };
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            UA_NODEID_STRING(1, "Voltage"),             // requestedNewNodeId
             SetPointFolder,                             // parentNodeId
             UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
             UA_QUALIFIEDNAME(1, "Voltage"),             // browseName
@@ -759,7 +759,7 @@ int main(int argc, char *argv[])
         };
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            UA_NODEID_STRING(1, "Current"),             // requestedNewNodeId
             SetPointFolder,                             // parentNodeId
             UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
             UA_QUALIFIEDNAME(1, "Current"),             // browseName
@@ -785,7 +785,7 @@ int main(int argc, char *argv[])
         };
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            UA_NODEID_STRING(1, "VoltageSetpoint"),     // requestedNewNodeId
             SetPointFolder,                             // parentNodeId
             UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
             UA_QUALIFIEDNAME(1, "VoltageSetpoint"),     // browseName
@@ -810,7 +810,7 @@ int main(int argc, char *argv[])
         };
     UA_Server_addDataSourceVariableNode(
             server,
-            UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+            UA_NODEID_STRING(1, "CurrentSetpoint"),     // requestedNewNodeId
             SetPointFolder,                             // parentNodeId
             UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
             UA_QUALIFIEDNAME(1, "CurrentSetpoint"),     // browseName
@@ -831,7 +831,7 @@ int main(int argc, char *argv[])
     object_attr.displayName = UA_LOCALIZEDTEXT("en_US","Registers");
     UA_NodeId RegistersFolder;
     UA_Server_addObjectNode(server,                                        // UA_Server *server
-                            UA_NODEID_NUMERIC(1, 0),                       // UA_NodeId requestedNewNodeId
+                            UA_NODEID_STRING(1, "Registers"),              // UA_NodeId requestedNewNodeId
                             UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),  // UA_NodeId parentNodeId
                             UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),      // UA_NodeId referenceTypeId
                             UA_QUALIFIEDNAME(1, "Registers"),              // UA_QualifiedName browseName
@@ -892,7 +892,7 @@ int main(int argc, char *argv[])
                     };
                 UA_Server_addDataSourceVariableNode(
                         server,
-                        UA_NODEID_NUMERIC(1, 0),                    // requestedNewNodeId
+                        UA_NODEID_STRING(1, nodeName),              // requestedNewNodeId
                         RegistersFolder,                            // parentNodeId
                         UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),   // referenceTypeId
                         UA_QUALIFIEDNAME(1, nodeName),              // browseName
