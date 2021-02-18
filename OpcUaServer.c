@@ -1,6 +1,6 @@
 /** @mainpage OpcUaServer for the CAENels FAST-PS power supplies
  *
- *  Version 0.2  27.1.2017
+ *  Version 1.1  18.2.2021
  *
  *  @author U. Lehnert, Helmholtz-Zentrum Dresden-Rossendorf
  *
@@ -55,18 +55,12 @@
  *  For a first test of the server an universal OPC UA client like
  *  [UaExpert](https://www.unified-automation.com/products/development-tools/uaexpert.html) is recommended.
  *
- *  A LabView client demonstrating the access using OPC UA is provided in the examples/ folder.
- *
  *  @section TODO
  *  - evaluate the AK/NAK responses
  *  - error handling when reading the device response, don't just die
  *  - VER
  *  - LOOP
  *  - MSAVE
- *
- */
-
-/** @file OpcUaServer.c
  *
  */
 
@@ -242,6 +236,43 @@ UA_StatusCode writeMReset(void *handle, const UA_NodeId nodeid,
         strcpy(command,"MRESET\r\n");
         TcpSendReceive();
     };
+    return UA_STATUSCODE_GOOD;
+}
+
+// switch to SFP update mode and back
+UA_StatusCode writeDeviceModeSFP(void *handle, const UA_NodeId nodeid,
+            const UA_Variant *data, const UA_NumericRange *range) {
+    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_BOOLEAN] && data->data) {
+        *(UA_Boolean*)handle = *(UA_Boolean*)data->data;
+    }
+    if (*(bool *)handle) {
+        // switch on the output
+        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "UPMODE:SFP");
+        strcpy(command,"UPMODE:SFP\r\n");
+        TcpSendReceive();
+    } else {
+        // switch off the output
+        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "UPMODE:NORMAL");
+        strcpy(command,"UPMODE:NORMAL\r\n");
+        TcpSendReceive();
+    };
+    return UA_STATUSCODE_GOOD;
+}
+
+// read the SFP output mode
+UA_StatusCode readDeviceModeSFP( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
+        const UA_NumericRange *range, UA_DataValue *dataValue) {
+    // send status request to server    
+    strcpy(command,"UPMODE\r\n");
+    unsigned int reclen = TcpSendReceive();
+    // first 8 charecters are #UPMODE:
+    if (strncmp(response+8,"SFP",3)==0)
+        *(bool *)handle = true;
+    else
+        *(bool *)handle = false;
+    // set the variable value
+    dataValue->hasValue = true;
+    UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean *)handle, &UA_TYPES[UA_TYPES_BOOLEAN]);
     return UA_STATUSCODE_GOOD;
 }
 
@@ -533,6 +564,7 @@ int main(int argc, char *argv[])
     |   Status
     |   OutputOn
     |   MReset
+    |   SFP-upmode
     **************************/
 
     // create the folder
@@ -639,6 +671,30 @@ int main(int argc, char *argv[])
             UA_NODEID_NULL,
             attr,
             DeviceMResetDataSource,
+            NULL);
+
+    // writing SFP-upmode as true switches to setpoint input from the SFP port
+    // setting it to false switches back to normal mode of operation
+    bool UpmodeSFP = 0;
+    UA_VariableAttributes_init(&attr);
+    attr.description = UA_LOCALIZEDTEXT("en_US","on/off state of the SFP setpoint input");
+    attr.displayName = UA_LOCALIZEDTEXT("en_US","SFP-upmode");
+    attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+    UA_DataSource SFPmodeDataSource = (UA_DataSource)
+        {
+            .handle = &UpmodeSFP,
+            .read = readDeviceModeSFP,
+            .write = writeDeviceModeSFP
+        };
+    UA_Server_addDataSourceVariableNode(
+            server,
+            UA_NODEID_NUMERIC(1, 0),
+            DeviceFolder,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_QUALIFIEDNAME(1, "SFP-upmode"),
+            UA_NODEID_NULL,
+            attr,
+            SFPmodeDataSource,
             NULL);
 
     /**************************
