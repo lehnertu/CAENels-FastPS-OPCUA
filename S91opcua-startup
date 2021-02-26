@@ -1,0 +1,13 @@
+#! /bin/sh
+### BEGIN INIT INFO
+# Provides:             opcuaserver
+# Required-Start:
+# Required-Stop:
+# Default-Start:        5
+# Default-Stop:         6
+# Short-Description:    OPC UA server
+### END INIT INFO
+
+sleep 30
+nohup /opt/opcuaserver >/var/log/opcua.log 2>&1 &
+

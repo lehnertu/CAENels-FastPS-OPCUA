@@ -21,9 +21,6 @@
  *  in an accelerator control system environment is provided. This does not
  *  cover the whole functionality provided by the devices, only the essentials.
  *
- *  For faster control an UDP server was implemented listening at port 16665.
- *  This is now provided as a separate binary.
- *  
  *  @section Build
  *  The server is built with a cross-compiler running on a Linux system
  *  for the ARM target CPU of the power supplies.
@@ -41,7 +38,7 @@
  *  - source ../tools/environment
  *  - $CC -std=c99 -c open62541.c
  *  - $CC -std=c99 -c -I $SDKTARGETSYSROOT/usr/include/libxml2/ OpcUaServer.c
- *  - $CXX -o opcuaserver OpcUaServer.o open62541.o -lxml2
+ *  - $CXX -o opcuaserver OpcUaServer.o open62541.o $SDKTARGETSYSROOT/usr/lib/libxml2.a -lpthread
  *
  *  @section Installation
  *  For istallation a few files need to be copied onto the device:
@@ -62,6 +59,8 @@
  *  - LOOP
  *  - MSAVE
  *
+ *  - first register number is 0 (instead of 31) when read/write access occurs
+ *  - server hangs after register write
  */
 
 #include <unistd.h>
@@ -87,10 +86,8 @@
 /***********************************/
 
 // the OPC-UA server
-UA_Server *server;
-unsigned short serverPortNumber;
-// log to the console
-UA_Logger logger = Logger_Stdout;
+static UA_Server *server;
+static unsigned short serverPortNumber;
 
 // Overview of the OPC-UA variables hosted by this server.
 // all parameters are double-valued registers accessed with MRG/MWG
@@ -117,23 +114,23 @@ UA_Logger logger = Logger_Stdout;
 
 // this variable is a flag for the running server
 // when set to false the server stops
-UA_Boolean running = true;
+static volatile UA_Boolean running = true;
 
 /***********************************/
 /* interrupt and error handling    */
 /***********************************/
 
 // print error message and abort the running program
-void Die(char *mess)
+static void Die(char *mess)
 {
-    UA_LOG_FATAL(logger, UA_LOGCATEGORY_SERVER, mess);
+    UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, mess);
     exit(1);
 }
 
 // handle SIGINT und SIGTERM
 static void stopHandler(int signal)
 {
-    UA_LOG_INFO(logger, UA_LOGCATEGORY_SERVER, "received ctrl-c");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "received ctrl-c");
     running = 0;
 }
 
@@ -141,24 +138,25 @@ static void stopHandler(int signal)
 /* TCP/IP communication            */
 /***********************************/
 
-int sock;
-struct sockaddr_in tcpserver;
+static int sock;
+static struct sockaddr_in tcpserver;
 
 #define BUFSIZE 80
-char command[BUFSIZE];			// command string buffer
-char response[BUFSIZE];			// receive buffer
+static char command[BUFSIZE];			// command string buffer
+static char response[BUFSIZE];			// receive buffer
 
 // send the string in command to the device
 // receive the answer in response
 // return the number of read characters
-unsigned int TcpSendReceive() {
+static int TcpSendReceive() {
     unsigned int buflen = strlen(command);
+	// printf("send %d bytes to socket %d\n",buflen,sock);
     if (send(sock, command, buflen, 0) != buflen)
         Die("Mismatch in number of sent bytes");
     // receive the answer from the server
-    unsigned int reclen;
-    reclen = recv(sock, response, BUFSIZE-1, 0);
-    response[reclen] = '\0';			// assure null terminated string
+    int reclen = recv(sock, response, BUFSIZE-1, 0);
+	// printf("received %d bytes from socket %d\n",reclen,sock);
+	if (reclen>0) response[reclen] = '\0';			// assure null terminated string
     return reclen;
 }
 
@@ -168,257 +166,410 @@ unsigned int TcpSendReceive() {
 /***********************************/
 
 // switch the output on/off
-// handle (pointing at DeviceOutputOn) is interpreted as a boolean on/off information
-UA_StatusCode writeDeviceOutputOn(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_BOOLEAN] && data->data) {
-        *(UA_Boolean*)handle = *(UA_Boolean*)data->data;
+static UA_StatusCode writeDeviceOutputOn(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    const UA_NumericRange *range,
+    const UA_DataValue *data)
+{
+    if(data->hasValue && UA_Variant_isScalar(&data->value) && (data->value.type == &UA_TYPES[UA_TYPES_BOOLEAN]) && (data->value.data != 0))
+    {
+        bool val = *(bool*)data->value.data;
+        
+        if(val)
+        {
+            // switch on the output
+            UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MON");
+            strcpy(command,"MON\r\n");
+            TcpSendReceive();
+        }
+        else
+        {
+            // switch off the output
+            UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MOFF");
+            strcpy(command,"MOFF\r\n");
+            TcpSendReceive();
+        }
+        return UA_STATUSCODE_GOOD;
     }
-    if (*(bool *)handle) {
-        // switch on the output
-        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "MON");
-        strcpy(command,"MON\r\n");
-        TcpSendReceive();
-    } else {
-        // switch off the output
-        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "MOFF");
-        strcpy(command,"MOFF\r\n");
-        TcpSendReceive();
-    };
-    return UA_STATUSCODE_GOOD;
+    else
+    {
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid data for writeDeviceOutputOn()");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
+    }
 }
 
-UA_StatusCode readDeviceOutputOn( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
+static UA_StatusCode readDeviceOutputOn(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    UA_Boolean sourceTimeStamp,
+    const UA_NumericRange *range,
+    UA_DataValue *dataValue)
+{
     // send status request to server    
     strcpy(command,"MST\r\n");
-    unsigned int reclen = TcpSendReceive();
+    int reclen = TcpSendReceive();
     // convert the answer into a number
     // first 5 charecters are #MST:
     unsigned int status;
     sscanf(response+5,"%x",&status);
-    *(bool *)handle = (status & 1 == 1);
-    // set the variable value
+    bool val = (status & 1 == 1);
+    UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean*)(&val), &UA_TYPES[UA_TYPES_BOOLEAN]);
     dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean *)handle, &UA_TYPES[UA_TYPES_BOOLEAN]);
     return UA_STATUSCODE_GOOD;
 }
 
-UA_StatusCode readDeviceStatus( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
+static UA_StatusCode readDeviceStatus(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    UA_Boolean sourceTimeStamp,
+    const UA_NumericRange *range,
+    UA_DataValue *dataValue)
+{
     // send request to server    
     strcpy(command,"MST\r\n");
-    unsigned int reclen = TcpSendReceive();
+    int reclen = TcpSendReceive();
     // convert the answer into a number
     // first 5 charecters are #MST:
     unsigned int status;
     int result = sscanf(response+5,"%x",&status);
     if (result==0)
-        *(unsigned int *)handle = -1;
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
     else
-        *(unsigned int *)handle = status;
-    // set the variable value
-    dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (unsigned int *)handle, &UA_TYPES[UA_TYPES_UINT32]);
-    return UA_STATUSCODE_GOOD;
+	{
+        UA_Variant_setScalarCopy(&dataValue->value, (UA_UInt32*)(&status), &UA_TYPES[UA_TYPES_UINT32]);
+        dataValue->hasValue = true;
+        return UA_STATUSCODE_GOOD;
+	}
 }
 
 // write an MRESET command when set to true
-UA_StatusCode writeMReset(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_BOOLEAN] && data->data) {
-        *(UA_Boolean*)handle = *(UA_Boolean*)data->data;
+static UA_StatusCode writeMReset(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    const UA_NumericRange *range,
+    const UA_DataValue *data)
+{
+    if(data->hasValue && UA_Variant_isScalar(&data->value) && (data->value.type == &UA_TYPES[UA_TYPES_BOOLEAN]) && (data->value.data != 0))
+    {
+        bool val = *(bool*)data->value.data;
+        if(val)
+        {
+		    // report to log
+		    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "MRESET");
+		    // send command
+		    strcpy(command,"MRESET\r\n");
+		    TcpSendReceive();
+        }
+		return UA_STATUSCODE_GOOD;
     }
-    if (*(bool *)handle) {
-        // report to log
-        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "MRESET");
-        // send command
-        strcpy(command,"MRESET\r\n");
-        TcpSendReceive();
-    };
-    return UA_STATUSCODE_GOOD;
+    else
+    {
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid data for writeMReset()");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
+    }
 }
 
 // switch to SFP update mode and back
-UA_StatusCode writeDeviceModeSFP(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_BOOLEAN] && data->data) {
-        *(UA_Boolean*)handle = *(UA_Boolean*)data->data;
+static UA_StatusCode writeDeviceModeSFP(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    const UA_NumericRange *range,
+    const UA_DataValue *data)
+{
+    if(data->hasValue && UA_Variant_isScalar(&data->value) && (data->value.type == &UA_TYPES[UA_TYPES_BOOLEAN]) && (data->value.data != 0))
+    {
+        bool val = *(bool*)data->value.data;
+        if(val)
+        {
+            // switch to te fast data interface
+            UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "UPMODE:SFP");
+            strcpy(command,"UPMODE:SFP\r\n");
+            TcpSendReceive();
+        }
+        else
+        {
+            // switch off the fast data interface
+            UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "UPMODE:NORMAL");
+            strcpy(command,"UPMODE:NORMAL\r\n");
+            TcpSendReceive();
+        }
+        return UA_STATUSCODE_GOOD;
     }
-    if (*(bool *)handle) {
-        // switch on the output
-        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "UPMODE:SFP");
-        strcpy(command,"UPMODE:SFP\r\n");
-        TcpSendReceive();
-    } else {
-        // switch off the output
-        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "UPMODE:NORMAL");
-        strcpy(command,"UPMODE:NORMAL\r\n");
-        TcpSendReceive();
-    };
-    return UA_STATUSCODE_GOOD;
+    else
+    {
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid data for writeDeviceModeSFP()");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
+    }
 }
 
 // read the SFP output mode
-UA_StatusCode readDeviceModeSFP( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
+static UA_StatusCode readDeviceModeSFP(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    UA_Boolean sourceTimeStamp,
+    const UA_NumericRange *range,
+    UA_DataValue *dataValue)
+{
     // send status request to server    
     strcpy(command,"UPMODE\r\n");
-    unsigned int reclen = TcpSendReceive();
+    int reclen = TcpSendReceive();
     // first 8 charecters are #UPMODE:
-    if (strncmp(response+8,"SFP",3)==0)
-        *(bool *)handle = true;
-    else
-        *(bool *)handle = false;
+    bool val = (strncmp(response+8,"SFP",3)==0);
     // set the variable value
+    UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean*)(&val), &UA_TYPES[UA_TYPES_BOOLEAN]);
     dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean *)handle, &UA_TYPES[UA_TYPES_BOOLEAN]);
     return UA_STATUSCODE_GOOD;
 }
 
 // callback routine for reading the current value
-UA_StatusCode readCurrent( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
-    // handle is supposed to point to CurrentReadback
+static UA_StatusCode readCurrent(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    UA_Boolean sourceTimeStamp,
+    const UA_NumericRange *range,
+    UA_DataValue *dataValue)
+{
+    double val;
     // send request to server    
     strcpy(command,"MRI\r\n");
-    unsigned int reclen = TcpSendReceive();
+    int reclen = TcpSendReceive();
     // convert buffer to numerical value
     // first 5 charecters are #MRI:
     if(strncmp(response,"#MRI:",5)==0)
-        sscanf(response+5,"%lf",(double *)handle);
+    {
+        sscanf(response+5,"%lf",&val);
+        // set the variable value
+        UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)(&val), &UA_TYPES[UA_TYPES_DOUBLE]);
+        dataValue->hasValue = true;
+        return UA_STATUSCODE_GOOD;
+    }
     else
     {
-        // printf("wrong MRI response : %s",response);
-        *(double *)handle = 999.999;
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid MRI response");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
     }
-    // set the variable value
-    dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
-    return UA_STATUSCODE_GOOD;
-}
-
-// callback routine for writing the current value
-UA_StatusCode writeCurrent(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    // handle is supposed to point to CurrentReadback
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_DOUBLE] && data->data) {
-        *(UA_Double*)handle = *(UA_Double*)data->data;
-    }
-    // send request to server
-    sprintf(command,"MWI:%9.6f\r\n",*(double *)handle);
-    // UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
-    TcpSendReceive();
-    return UA_STATUSCODE_GOOD;
-}
-
-// callback routine for reading the current setpoint
-// this only works if the output is on, otherwise #NAK:13 is answered
-UA_StatusCode readCurrentSetpoint( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
-    // send request to server    
-    strcpy(command,"MWI:?\r\n");
-    unsigned int reclen = TcpSendReceive();
-    // convert buffer to numerical value
-    // first 5 charecters are #MWI:
-    if(strncmp(response,"#MWI:",5)==0)
-        sscanf(response+5,"%lf",(double *)handle);
-    else
-        *(double *)handle = 999.999;
-    // set the variable value
-    dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
-    return UA_STATUSCODE_GOOD;
 }
 
 // callback routine for reading the voltage value
-UA_StatusCode readVoltage( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
-    // handle is supposed to point to VoltageReadback
+static UA_StatusCode readVoltage(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    UA_Boolean sourceTimeStamp,
+    const UA_NumericRange *range,
+    UA_DataValue *dataValue)
+{
+    double val;
     // send request to server    
     strcpy(command,"MRV\r\n");
-    unsigned int reclen = TcpSendReceive();
+    int reclen = TcpSendReceive();
     // convert buffer to numerical value
     // first 5 charecters are #MRV:
     if(strncmp(response,"#MRV:",5)==0)
-        sscanf(response+5,"%lf",(double *)handle);
+    {
+        sscanf(response+5,"%lf",&val);
+        // set the variable value
+        UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)(&val), &UA_TYPES[UA_TYPES_DOUBLE]);
+        dataValue->hasValue = true;
+        return UA_STATUSCODE_GOOD;
+    }
     else
-        *(double *)handle = 999.999;
-    int result = sscanf(response+5,"%lf",(double *)handle);
-    // set the variable value
-    dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
-    return UA_STATUSCODE_GOOD;
+    {
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid MRV response");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
+    }
 }
 
-// callback routine for writing the voltage value
-UA_StatusCode writeVoltage(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    // handle is supposed to point to VoltageReadback
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_DOUBLE] && data->data) {
-        *(UA_Double*)handle = *(UA_Double*)data->data;
+// callback routine for writing the current setpoint
+static UA_StatusCode writeCurrentSetpoint(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    const UA_NumericRange *range,
+    const UA_DataValue *data)
+{
+    if(data->hasValue && UA_Variant_isScalar(&data->value) && (data->value.type == &UA_TYPES[UA_TYPES_DOUBLE]) && (data->value.data != 0))
+    {
+        double val = *(double*)data->value.data;
+        // send request to server
+        snprintf(command,BUFSIZE,"MWI:%9.6f\r\n",val);
+        TcpSendReceive();
+        return UA_STATUSCODE_GOOD;
     }
-    // send request to server
-    sprintf(command,"MWV:%9.6f\r\n",*(double *)handle);
-    // UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
-    TcpSendReceive();
-    return UA_STATUSCODE_GOOD;
+    else
+    {
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid data for writeCurrent()");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
+    }
+}
+
+// callback routine for reading the current setpoint
+static UA_StatusCode readCurrentSetpoint(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    UA_Boolean sourceTimeStamp,
+    const UA_NumericRange *range,
+    UA_DataValue *dataValue)
+{
+    double val;
+    
+    // send request to server    
+    strcpy(command,"MWI:?\r\n");
+    int reclen = TcpSendReceive();
+    // convert buffer to numerical value
+    // first 5 charecters are #MWI:
+    if(strncmp(response,"#MWI:",5)==0)
+    {
+        sscanf(response+5,"%lf",&val);
+        // set the variable value
+        UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)(&val), &UA_TYPES[UA_TYPES_DOUBLE]);
+        dataValue->hasValue = true;
+        return UA_STATUSCODE_GOOD;
+    }
+    else
+    {
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid MWI:? response");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
+    }
+}
+
+// callback routine for writing the voltage setpoint
+static UA_StatusCode writeVoltageSetpoint(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    const UA_NumericRange *range,
+    const UA_DataValue *data)
+{
+    if(data->hasValue && UA_Variant_isScalar(&data->value) && (data->value.type == &UA_TYPES[UA_TYPES_DOUBLE]) && (data->value.data != 0))
+    {
+        double val = *(double*)data->value.data;
+        // send request to server
+        snprintf(command,BUFSIZE,"MWV:%9.6f\r\n",val);
+        TcpSendReceive();
+        return UA_STATUSCODE_GOOD;
+    }
+    else
+    {
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid data for writeVoltage()");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
+    }
 }
 
 // callback routine for reading the voltage setpoint
-// this only works if the output is on, otherwise #NAK:13 is answered
-UA_StatusCode readVoltageSetpoint( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
+static UA_StatusCode readVoltageSetpoint(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    UA_Boolean sourceTimeStamp,
+    const UA_NumericRange *range,
+    UA_DataValue *dataValue)
+{
+    double val;
+    
     // send request to server    
     strcpy(command,"MWV:?\r\n");
-    unsigned int reclen = TcpSendReceive();
+    int reclen = TcpSendReceive();
     // convert buffer to numerical value
     // first 5 charecters are #MWV:
     if(strncmp(response,"#MWV:",5)==0)
-        sscanf(response+5,"%lf",(double *)handle);
+    {
+        sscanf(response+5,"%lf",&val);
+        // set the variable value
+        UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)(&val), &UA_TYPES[UA_TYPES_DOUBLE]);
+        dataValue->hasValue = true;
+        return UA_STATUSCODE_GOOD;
+    }
     else
-        *(double *)handle = 999.999;
-    // set the variable value
-    dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
-    return UA_STATUSCODE_GOOD;
+    {
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid MWV:? response");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
+    }
 }
 
-UA_StatusCode readRegister( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
-    // handle is supposed to point to the (unsigned short) register number
-    unsigned short index = *((unsigned short *)handle);
-    double value;
-    sprintf(command,"MRG:%d\r\n",index);
-    // UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
-    unsigned int reclen = TcpSendReceive();
+// callback routine for reading registers
+static UA_StatusCode readRegister(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    UA_Boolean sourceTimeStamp,
+    const UA_NumericRange *range,
+    UA_DataValue *dataValue)
+{
+    double val;
+    // the node context is supposed to point to the (unsigned short) register number
+    unsigned short index = *((unsigned short *)nodeContext);
+    // send request to server    
+    snprintf(command,BUFSIZE,"MRG:%d\r\n",index);
+    // register reads are logged
+    // UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
+    int reclen = TcpSendReceive();
     // TODO: check reclen
+    // UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, response);
     // convert buffer to numerical value
     // first 8 charecters are #MRG:??:
-    int result = sscanf(response+8,"%lf",&value);
-    // TODO: check result
-    // set the variable value
-    dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)&value, &UA_TYPES[UA_TYPES_DOUBLE]);
-    return UA_STATUSCODE_GOOD;
+    if(strncmp(response,"#MRG:",5)==0)
+    {
+        // this only works for 2-digit register numbers
+        int result = sscanf(response+8,"%lf",&val);
+        // TODO: check result
+        // set the variable value
+        UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)(&val), &UA_TYPES[UA_TYPES_DOUBLE]);
+        dataValue->hasValue = true;
+        return UA_STATUSCODE_GOOD;
+    }
+    else
+    {
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid MRG response");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
+    }
 }
 
-UA_StatusCode writeRegister(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    // handle is supposed to point to the (unsigned short) register number
-    unsigned short index = *((unsigned short *)handle);
-    double value;
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_DOUBLE] && data->data) {
-        value = *(double *)data->data;
-        // register writes are logged
-        sprintf(command,"MWG:%d:%lf",index,value);
-        UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, command);
+// callback routine for writing registers
+static UA_StatusCode writeRegister(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    const UA_NumericRange *range,
+    const UA_DataValue *data)
+{
+    if(data->hasValue && UA_Variant_isScalar(&data->value) && (data->value.type == &UA_TYPES[UA_TYPES_DOUBLE]) && (data->value.data != 0))
+    {
+        double val = *(double*)data->value.data;
+        // the node context is supposed to point to the (unsigned short) register number
+        unsigned short index = *((unsigned short *)nodeContext);
         // send request to server
-        sprintf(command,"MWG:%d:%lf\r\n",index,value);
-        TcpSendReceive();
-        printf("MWG response : %s",response);
+        snprintf(command,BUFSIZE,"MWG:%d:%lf\r\n",index,val);
+	    // register writes are logged
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, command);
+		// TcpSendReceive() called from here fails - everywhere else it works fine
+        int reclen = TcpSendReceive();
+		// typical response is #AK
+		if (reclen>3)
+		{
+		    // UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, response);
+		    return UA_STATUSCODE_GOOD;
+		}
+		else
+		{
+			UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, response);
+			return UA_STATUSCODE_BADCOMMUNICATIONERROR;
+		}
     }
-    return UA_STATUSCODE_GOOD;
+    else
+    {
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "invalid data for writeRegister()");
+        return UA_STATUSCODE_UNCERTAINNOCOMMUNICATIONLASTUSABLEVALUE;
+    }
 }
 
 /***********************************/
@@ -426,32 +577,57 @@ UA_StatusCode writeRegister(void *handle, const UA_NodeId nodeid,
 /* for server-internal variables   */
 /***********************************/
 
-UA_StatusCode readBoolean( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-        const UA_NumericRange *range, UA_DataValue *dataValue) {
-    // set the variable value
+static UA_StatusCode readBoolean(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    UA_Boolean sourceTimeStamp,
+    const UA_NumericRange *range,
+    UA_DataValue *dataValue)
+{
+    UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean*)nodeContext, &UA_TYPES[UA_TYPES_BOOLEAN]);
     dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Boolean*)handle, &UA_TYPES[UA_TYPES_BOOLEAN]);
     return UA_STATUSCODE_GOOD;
 }
 
-UA_StatusCode readUInt64( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-            const UA_NumericRange *range, UA_DataValue *dataValue) {
-    dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_UInt64*)handle, &UA_TYPES[UA_TYPES_UINT64]);
+// not used - code left here for potential future use
+static UA_StatusCode writeBoolean(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    const UA_NumericRange *range,
+    const UA_DataValue *data)
+{
+    if(UA_Variant_isScalar(&(data->value)) && data->value.type == &UA_TYPES[UA_TYPES_BOOLEAN] && data->value.data){
+        *(UA_Boolean*)nodeContext = *(UA_Boolean*)data->value.data;
+    }
     return UA_STATUSCODE_GOOD;
 }
 
-UA_StatusCode readDouble( void *handle, const UA_NodeId nodeid, UA_Boolean sourceTimeStamp,
-            const UA_NumericRange *range, UA_DataValue *dataValue) {
+// not used - code left here for potential future use
+static UA_StatusCode readDouble(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    UA_Boolean sourceTimeStamp,
+    const UA_NumericRange *range,
+    UA_DataValue *dataValue)
+{
+    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)nodeContext, &UA_TYPES[UA_TYPES_DOUBLE]);
     dataValue->hasValue = true;
-    UA_Variant_setScalarCopy(&dataValue->value, (UA_Double*)handle, &UA_TYPES[UA_TYPES_DOUBLE]);
     return UA_STATUSCODE_GOOD;
 }
 
-UA_StatusCode writeDouble(void *handle, const UA_NodeId nodeid,
-            const UA_Variant *data, const UA_NumericRange *range) {
-    if(UA_Variant_isScalar(data) && data->type == &UA_TYPES[UA_TYPES_DOUBLE] && data->data) {
-        *(UA_Double*)handle = *(UA_Double*)data->data;
+// not used - code left here for potential future use
+static UA_StatusCode writeDouble(
+    UA_Server *server,
+    const UA_NodeId *sessionId, void *sessionContext,
+    const UA_NodeId *nodeId, void *nodeContext,
+    const UA_NumericRange *range,
+    const UA_DataValue *data)
+{
+    if(UA_Variant_isScalar(&(data->value)) && data->value.type == &UA_TYPES[UA_TYPES_DOUBLE] && data->value.data){
+        *(UA_Double*)nodeContext = *(UA_Double*)data->value.data;
     }
     return UA_STATUSCODE_GOOD;
 }
@@ -503,7 +679,7 @@ int main(int argc, char *argv[])
     buf[buflen] = '\0';         // string termination
     if (sscanf(buf,"%d",&serverPortNumber)<1)
         Die("OpcUaServer : Failed to interpret <opcua> port property\n");
-    printf("OpcUaServer : OPC-UA port=%d\n", serverPortNumber);
+    // printf("OpcUaServer : OPC-UA port=%d\n", serverPortNumber);
     // find the device node
     xmlNode *deviceNode = NULL;
     for (xmlNode *currNode = configurationNode->children; currNode; currNode = currNode->next)
@@ -518,8 +694,11 @@ int main(int argc, char *argv[])
     if (buflen == 0)
         Die("OpcUaServer : Failed to read XML <opcua/device> name property\n");
     buf[buflen] = '\0';         // string termination
-    printf("OpcUaServer : DeviceName=%s\n", buf);
-    UA_String DeviceName = UA_STRING(buf);
+    // printf("OpcUaServer : DeviceName=%s\n", buf);
+    UA_String BufString = UA_STRING(buf);
+    UA_String *DeviceName = UA_String_new();
+    UA_String_copy(&BufString, DeviceName);
+
     // find the parameters node
     xmlNode *parametersNode = NULL;
     for (xmlNode *currNode = configurationNode->children; currNode; currNode = currNode->next)
@@ -534,7 +713,12 @@ int main(int argc, char *argv[])
     //***********************************
     if ((sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
         Die("ERROR : Failed to create socket");
-    UA_LOG_INFO(logger, UA_LOGCATEGORY_NETWORK, "TCP/IP socket opened.");
+	// set a timeout of 1 second for the socket
+	struct timeval tv;
+	tv.tv_sec = 1;
+	tv.tv_usec = 0;
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK, "TCP/IP socket opened.");
     // Construct the server sockaddr_in structure
     memset(&tcpserver, 0, sizeof(tcpserver));			   // clear struct
     tcpserver.sin_family = AF_INET;				           // Internet/IP
@@ -543,17 +727,27 @@ int main(int argc, char *argv[])
     // Establish connection
     if (connect(sock, (struct sockaddr *) &tcpserver, sizeof(tcpserver)) < 0)
         Die("ERROR : Failed to connect to TCP/IP server");
-    UA_LOG_INFO(logger, UA_LOGCATEGORY_NETWORK, "Connected to internal TCP/IP server.");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK, "Connected to internal TCP/IP server.");
 
     //***********************************
     // configure the UA server
     //***********************************
-    UA_ServerConfig config = UA_ServerConfig_standard;
-    UA_ServerNetworkLayer nl = UA_ServerNetworkLayerTCP(UA_ConnectionConfig_standard, serverPortNumber);
-    config.logger = logger;
-    config.networkLayers = &nl;
-    config.networkLayersSize = 1;
-    server = UA_Server_new(config);
+    
+    // configure the UA server
+    UA_ServerConfig config;
+    memset(&config, 0, sizeof(UA_ServerConfig));
+    UA_StatusCode res = UA_ServerConfig_setMinimal(&config, serverPortNumber, NULL);
+    if(res != UA_STATUSCODE_GOOD)
+    {
+        // printf("UA_ServerConfig_setMinimal() error %8x\n", res);
+        exit(-1);
+    }
+    UA_Server *server = UA_Server_newWithConfig(&config);
+    if(!server)
+    {
+        // printf("UA_Server_newWithConfig() failed\n");
+        exit(-1);
+    }
 
     UA_ObjectAttributes object_attr;   // attributes for folders
     UA_VariableAttributes attr;        // attributes for variable nodes
@@ -568,10 +762,10 @@ int main(int argc, char *argv[])
     **************************/
 
     // create the folder
-    UA_ObjectAttributes_init(&object_attr);
+    object_attr = UA_ObjectAttributes_default;
     object_attr.description = UA_LOCALIZEDTEXT("en_US","Device");
     object_attr.displayName = UA_LOCALIZEDTEXT("en_US","Device");
-    UA_NodeId DeviceFolder;
+    static UA_NodeId DeviceFolder;
     UA_Server_addObjectNode(server,                                        // UA_Server *server
                             UA_NODEID_NUMERIC(1, 0),                       // UA_NodeId requestedNewNodeId
                             UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),  // UA_NodeId parentNodeId
@@ -584,55 +778,57 @@ int main(int argc, char *argv[])
 
     // create the DeviceName variable
     // read-only value defined in the configuration file
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","device name");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","DeviceName");
+    attr.dataType = UA_TYPES[UA_TYPES_STRING].typeId;
+	attr.valueRank = UA_VALUERANK_SCALAR;
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
-    UA_Variant_setScalarCopy(&attr.value, &DeviceName, &UA_TYPES[UA_TYPES_STRING]);
+    UA_Variant_setScalarCopy(&attr.value, DeviceName, &UA_TYPES[UA_TYPES_STRING]);
     UA_Server_addVariableNode(server,                                       // UA_Server *server
                               UA_NODEID_NUMERIC(1, 0),                      // UA_NodeId requestedNewNodeId
                               DeviceFolder,                                 // UA_NodeId parentNodeId
-                              UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),  // UA_NodeId referenceTypeId
+                              UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),     // UA_NodeId referenceTypeId
                               UA_QUALIFIEDNAME(1, "DeviceName"),            // UA_QualifiedName browseName
-                              UA_NODEID_NULL,                               // UA_NodeId typeDefinition
+                              UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),  // UA_NodeId typeDefinition
                               attr,                                         // UA_VariableAttributes attr
-                              NULL,                                         // UA_InstantiationCallback *instantiationCallback
+                              NULL,                                         // const UA_DataSource dataSource
                               NULL);                                        // UA_NodeId *outNewNodeId
 
     // create the DeviceStatus variable
     // read-only
-    unsigned int DeviceStatus = 0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","power supply internal status");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","DeviceStatus");
+    attr.dataType = UA_TYPES[UA_TYPES_UINT32].typeId;
+	attr.valueRank = UA_VALUERANK_SCALAR;
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
     UA_DataSource DeviceStatusDataSource = (UA_DataSource)
         {
-            .handle = &DeviceStatus,
             .read = readDeviceStatus,
-            .write = 0
+            .write = NULL
         };
     UA_Server_addDataSourceVariableNode(
             server,
             UA_NODEID_NUMERIC(1, 0),
             DeviceFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "DeviceStatus"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             DeviceStatusDataSource,
-            NULL);
+            NULL, NULL);
 
     // writing OutputOn as true switches on the device power output
     // reading returns the value obtained from the status word
-    bool DeviceOutputOn = 0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","on/off state of the device output");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","OutputOn");
+    attr.dataType = UA_TYPES[UA_TYPES_BOOLEAN].typeId;
+	attr.valueRank = UA_VALUERANK_SCALAR;
     attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
     UA_DataSource OutputOnDataSource = (UA_DataSource)
         {
-            .handle = &DeviceOutputOn,
             .read = readDeviceOutputOn,
             .write = writeDeviceOutputOn
         };
@@ -640,25 +836,25 @@ int main(int argc, char *argv[])
             server,
             UA_NODEID_NUMERIC(1, 0),
             DeviceFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "OutputOn"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             OutputOnDataSource,
-            NULL);
+            NULL, NULL);
 
     // create the Reset variable
     // boolean value - writing true performs the reset
     // read will always return false
-    // TODO: the value can actually become true - wrong!
     bool DeviceMResetValue = false;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","reset the module status register");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","MReset");
-    attr.accessLevel = UA_ACCESSLEVELMASK_READ;
+    attr.dataType = UA_TYPES[UA_TYPES_BOOLEAN].typeId;
+	attr.valueRank = UA_VALUERANK_SCALAR;
+    attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
     UA_DataSource DeviceMResetDataSource = (UA_DataSource)
         {
-            .handle = &DeviceMResetValue,
             .read = readBoolean,
             .write = writeMReset
         };
@@ -666,23 +862,23 @@ int main(int argc, char *argv[])
             server,
             UA_NODEID_NUMERIC(1, 0),
             DeviceFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "MReset"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             DeviceMResetDataSource,
-            NULL);
+            &DeviceMResetValue, NULL);
 
     // writing SFP-upmode as true switches to setpoint input from the SFP port
     // setting it to false switches back to normal mode of operation
-    bool UpmodeSFP = 0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","on/off state of the SFP setpoint input");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","SFP-upmode");
+    attr.dataType = UA_TYPES[UA_TYPES_BOOLEAN].typeId;
+	attr.valueRank = UA_VALUERANK_SCALAR;
     attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
     UA_DataSource SFPmodeDataSource = (UA_DataSource)
         {
-            .handle = &UpmodeSFP,
             .read = readDeviceModeSFP,
             .write = writeDeviceModeSFP
         };
@@ -690,25 +886,26 @@ int main(int argc, char *argv[])
             server,
             UA_NODEID_NUMERIC(1, 0),
             DeviceFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "SFP-upmode"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             SFPmodeDataSource,
-            NULL);
-
+            NULL, NULL);
+    
     /**************************
     SetPoint
     |   Voltage
     |   Current
-    |   VOltageSetpoint
+    |   VoltageSetpoint
     |   CurrentSetpoint
     **************************/
 
-    UA_ObjectAttributes_init(&object_attr);
+    // create the folder
+    object_attr = UA_ObjectAttributes_default;
     object_attr.description = UA_LOCALIZEDTEXT("en_US","output settings");
     object_attr.displayName = UA_LOCALIZEDTEXT("en_US","SetPoint");
-    UA_NodeId SetPointFolder;
+    static UA_NodeId SetPointFolder;
     UA_Server_addObjectNode(server,                                        // UA_Server *server
                             UA_NODEID_NUMERIC(1, 0),                       // UA_NodeId requestedNewNodeId
                             UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),  // UA_NodeId parentNodeId
@@ -717,38 +914,16 @@ int main(int argc, char *argv[])
                             UA_NODEID_NUMERIC(0, UA_NS0ID_FOLDERTYPE),     // UA_NodeId typeDefinition
                             object_attr,                                   // UA_ObjectAttributes attr
                             NULL,                                          // UA_InstantiationCallback *instantiationCallback
-                            &SetPointFolder);                                // UA_NodeId *outNewNodeId
+                            &SetPointFolder);                              // UA_NodeId *outNewNodeId
 
-    double VoltageReadback = 0.0;
-    UA_VariableAttributes_init(&attr);
-    attr.description = UA_LOCALIZEDTEXT("en_US","voltage readback [V]");
-    attr.displayName = UA_LOCALIZEDTEXT("en_US","Voltage");
-    attr.accessLevel = UA_ACCESSLEVELMASK_READ;
-    UA_DataSource VoltageDataSource = (UA_DataSource)
-        {
-            .handle = &VoltageReadback,
-            .read = readVoltage,
-            .write = 0
-        };
-    UA_Server_addDataSourceVariableNode(
-            server,
-            UA_NODEID_NUMERIC(1, 0),
-            SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
-            UA_QUALIFIEDNAME(1, "Voltage"),
-            UA_NODEID_NULL,
-            attr,
-            VoltageDataSource,
-            NULL);
-
-    double CurrentReadback = 0.0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","current readback [A]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","Current");
+    attr.dataType = UA_TYPES[UA_TYPES_DOUBLE].typeId;
+	attr.valueRank = UA_VALUERANK_SCALAR;
     attr.accessLevel = UA_ACCESSLEVELMASK_READ;
     UA_DataSource CurrentDataSource = (UA_DataSource)
         {
-            .handle = &CurrentReadback,
             .read = readCurrent,
             .write = 0
         };
@@ -756,76 +931,98 @@ int main(int argc, char *argv[])
             server,
             UA_NODEID_NUMERIC(1, 0),
             SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "Current"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             CurrentDataSource,
-            NULL);
+            NULL, NULL);
+
+    attr = UA_VariableAttributes_default;
+    attr.description = UA_LOCALIZEDTEXT("en_US","voltage readback [V]");
+    attr.displayName = UA_LOCALIZEDTEXT("en_US","Voltage");
+    attr.dataType = UA_TYPES[UA_TYPES_DOUBLE].typeId;
+	attr.valueRank = UA_VALUERANK_SCALAR;
+    attr.accessLevel = UA_ACCESSLEVELMASK_READ;
+    UA_DataSource VoltageDataSource = (UA_DataSource)
+        {
+            .read = readVoltage,
+            .write = 0
+        };
+    UA_Server_addDataSourceVariableNode(
+            server,
+            UA_NODEID_NUMERIC(1, 0),
+            SetPointFolder,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
+            UA_QUALIFIEDNAME(1, "Voltage"),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+            attr,
+            VoltageDataSource,
+            NULL, NULL);
 
     // when the setpoint is written, the voltage setting in the device is updated
-    // (the special writeVoltage() callback is used for that)
-    // reading the setpoint returns the active setpoint value
-    // as read from the device
+    // (the special writeVoltageSetpoint() callback is used for that)
+    // reading the setpoint returns the active setpoint value reported by the device
     // (the special readVoltageSetpoint() callback is used for that)
-    double VoltageSetpoint = 0.0;
-    UA_VariableAttributes_init(&attr);
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","voltage setpoint [V]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","VoltageSetpoint");
+    attr.dataType = UA_TYPES[UA_TYPES_DOUBLE].typeId;
+	attr.valueRank = UA_VALUERANK_SCALAR;
     attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
     UA_DataSource VoltageSetpointDataSource = (UA_DataSource)
         {
-            .handle = &VoltageSetpoint,
             .read = readVoltageSetpoint,
-            .write = writeVoltage
+            .write = writeVoltageSetpoint
         };
     UA_Server_addDataSourceVariableNode(
             server,
             UA_NODEID_NUMERIC(1, 0),
             SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "VoltageSetpoint"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             VoltageSetpointDataSource,
-            NULL);
+            NULL, NULL);
 
     // when the setpoint is written, the current setting in the device is updated
-    // (the special writeCurrent() callback is used for that)
-    // reading the setpoint returns the active setpoint value
-    // as read from the device
-    double CurrentSetpoint = 0.0;
-    UA_VariableAttributes_init(&attr);
+    // (the special writeCurrentSetpoint() callback is used for that)
+    // reading the setpoint returns the active setpoint value  reported by the device
+    // (the special readCurrentSetpoint() callback is used for that)
+    attr = UA_VariableAttributes_default;
     attr.description = UA_LOCALIZEDTEXT("en_US","current setpoint [A]");
     attr.displayName = UA_LOCALIZEDTEXT("en_US","CurrentSetpoint");
+    attr.dataType = UA_TYPES[UA_TYPES_DOUBLE].typeId;
+	attr.valueRank = UA_VALUERANK_SCALAR;
     attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
     UA_DataSource CurrentSetpointDataSource = (UA_DataSource)
         {
-            .handle = &CurrentSetpoint,
             .read = readCurrentSetpoint,
-            .write = writeCurrent
+            .write = writeCurrentSetpoint
         };
     UA_Server_addDataSourceVariableNode(
             server,
             UA_NODEID_NUMERIC(1, 0),
             SetPointFolder,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
             UA_QUALIFIEDNAME(1, "CurrentSetpoint"),
-            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
             attr,
             CurrentSetpointDataSource,
-            NULL);
-
+            NULL, NULL);
+    
     /**************************
     Parameters
     |   define OPCUA variables for configuration registers
     |   all parameters are listed in opcua.xml
     **************************/
 
-    UA_ObjectAttributes_init(&object_attr);
+    // create the folder
+    object_attr = UA_ObjectAttributes_default;
     object_attr.description = UA_LOCALIZEDTEXT("en_US","parameter settings");
     object_attr.displayName = UA_LOCALIZEDTEXT("en_US","Registers");
-    UA_NodeId RegistersFolder;
+    static UA_NodeId RegistersFolder;
     UA_Server_addObjectNode(server,                                        // UA_Server *server
                             UA_NODEID_NUMERIC(1, 0),                       // UA_NodeId requestedNewNodeId
                             UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),  // UA_NodeId parentNodeId
@@ -835,18 +1032,27 @@ int main(int argc, char *argv[])
                             object_attr,                                   // UA_ObjectAttributes attr
                             NULL,                                          // UA_InstantiationCallback *instantiationCallback
                             &RegistersFolder);                             // UA_NodeId *outNewNodeId
-
+    
     // here we store the register numbers
-    unsigned short RegNr[maxreg];
-    // these are structs for acessing the data
-    UA_DataSource RegDS[maxreg];
+    // the register node context will point to this storage
+    static unsigned short RegNr[maxreg];
+
+    // unclear why - the TCP/IP communication crashs when attempting a register write
+	// if writeRegister is replace with writeCurrentSetpoint this works
+	static UA_DataSource RegDataSource;
+	RegDataSource.read = readRegister;
+	RegDataSource.write = writeRegister;
+
+	// attempt to use individual datasources for each register
+	// no - doesn't work any better
+	// UA_DataSource RegDS[maxreg];
+
     int loopindex=0;
     for (xmlNode *currNode = parametersNode->children; currNode; currNode = currNode->next)
         if (currNode->type == XML_ELEMENT_NODE)
             if (! strcmp(currNode->name, "register"))
             {
                 // set the variable attributes as they are read from the config file
-                UA_VariableAttributes_init(&attr);
                 // first the register number
                 unsigned short regNumber;
                 xmlChar *numberProp = xmlGetProp(currNode,"number");
@@ -854,7 +1060,7 @@ int main(int argc, char *argv[])
                 if (buflen == 0)
                     Die("OpcUaServer : Failed to read XML <register> number property\n");
                 buf[buflen] = '\0';         // string termination
-                if (sscanf(buf,"%d",&regNumber)<1)
+                if (sscanf(buf,"%u",&regNumber)<1)
                     Die("OpcUaServer : Failed to interpret <register> number property\n");
                 RegNr[loopindex] = regNumber;
                 // second the node name
@@ -865,38 +1071,42 @@ int main(int argc, char *argv[])
                     Die("OpcUaServer : Failed to read XML <register> name property\n");
                 buf[buflen] = '\0';         // string termination
                 strcpy(nodeName,buf);
-                printf("OpcUaServer : Register=%d %s\n", regNumber, nodeName);
-                attr.displayName = UA_LOCALIZEDTEXT("en_US",nodeName);
-                // thirdd the node description
+                // third the node description
+                char description[200];
                 xmlChar *descProp = xmlGetProp(currNode,"description");
                 buflen = xmlStrPrintf(buf, 80, "%s", descProp);
                 if (buflen == 0)
                     Die("OpcUaServer : Failed to read XML <register> description property\n");
                 buf[buflen] = '\0';         // string termination
-                attr.description = UA_LOCALIZEDTEXT("en_US",buf);
+                strcpy(description,buf);
+                
+                printf("OpcUaServer : Register=%d %s - %s\n", regNumber, nodeName, description);
+                
+                attr = UA_VariableAttributes_default;
+                attr.displayName = UA_LOCALIZEDTEXT("en_US",nodeName);
+                attr.description = UA_LOCALIZEDTEXT("en_US",description);
+                attr.dataType = UA_TYPES[UA_TYPES_DOUBLE].typeId;
+    			attr.valueRank = UA_VALUERANK_SCALAR;
                 attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
-                // get at pointer to the datasource storage
-                UA_DataSource *ds = RegDS+loopindex;
-                // the handle points to the register number
-                ds->handle = RegNr+loopindex;
-                // we have special routines for reading/writing registers
-                ds->read = readRegister;
-                ds->write = writeRegister;
+                
+                // add a node to the data model
                 UA_Server_addDataSourceVariableNode(
                         server,
                         UA_NODEID_NUMERIC(1, 0),
                         RegistersFolder,
-                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                        UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
                         UA_QUALIFIEDNAME(1, nodeName),
-                        UA_NODEID_NULL,
+                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
                         attr,
-                        *ds,
+                        RegDataSource,  // *ds,
+                        (void *)(RegNr+loopindex),
                         NULL);
+
                 loopindex++;
                 if (loopindex>=maxreg)
                     Die("OpcUaServer : too many registers\n");
             };
-
+    
     // done with the XML document
     xmlFreeDoc(doc);
     xmlCleanupParser();
@@ -905,13 +1115,15 @@ int main(int argc, char *argv[])
     UA_StatusCode retval = UA_Server_run(server, &running);
 
     // the server has stopped running
-    UA_LOG_INFO(logger, UA_LOGCATEGORY_SERVER, "server stopped running.");
+    if(retval != UA_STATUSCODE_GOOD)
+        printf("UA_Server_run() error %8x\n", retval);
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "server stopped running.");
     UA_Server_delete(server);
-    nl.deleteMembers(&nl);
+    // nl.deleteMembers(&nl);
 
     close(sock);
 
     printf("OpcUaServer : graceful exit\n");
-    return 0;
+    return (int)retval;
 
 }
